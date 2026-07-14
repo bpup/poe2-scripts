@@ -1,0 +1,24 @@
+leader:
+  role_id: "main"
+
+followers:
+  - role_id: "follower_1"
+    window_title: "Path of Exile 2"
+  - role_id: "follower_2"
+    window_title: "Path of Exile 2"
+  - role_id: "follower_3"
+    window_title: "Path of Exile 2"
+  - role_id: "follower_4"
+    window_title: "Path of Exile 2"
+  - role_id: "follower_5"
+    window_title: "Path of Exile 2"
+
+sampling:
+  tick_ms: 50
+  turn_threshold: 15
+
+runtime:
+  max_follower_lag_ms: 200
+  max_drift_ticks: 10
+  regroup_cooldown_ms: 3000
+  pause_on_resolution_mismatch: true
