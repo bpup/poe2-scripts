@@ -310,6 +310,19 @@ class MemoryReader:
         return EntityPosition(x, y, z)
 
     def read_awake_entities(self, proc: GameProcess) -> List[Tuple[int, float, float, float]]:
+        return self._walk_awake_entities(proc, include_paths=False)
+
+    def read_awake_entities_with_paths(
+        self, proc: GameProcess, path_keywords: Optional[List[str]] = None,
+    ) -> List[Tuple[int, float, float, float, Optional[str]]]:
+        return self._walk_awake_entities(proc, include_paths=True, path_keywords=path_keywords)
+
+    def _walk_awake_entities(
+        self,
+        proc: GameProcess,
+        include_paths: bool = False,
+        path_keywords: Optional[List[str]] = None,
+    ) -> List:
         offsets = self._nav.get("offsets", {})
         if not offsets:
             return []
@@ -339,10 +352,13 @@ class MemoryReader:
         if sentinel == 0:
             return []
 
-        entities: List[Tuple[int, float, float, float]] = []
+        entities = []
         cur = self._read_pointer(proc.handle, sentinel)
         visited = {cur}
         max_entities = 1500
+
+        if path_keywords is not None:
+            keyword_lower = [k.lower() for k in path_keywords]
 
         while cur != sentinel and len(entities) < max_entities:
             if cur is None or cur < 0x10000:
@@ -352,7 +368,14 @@ class MemoryReader:
             if entity_addr and entity_addr > 0x10000:
                 pos = self._read_entity_position(proc, entity_addr)
                 if pos is not None:
-                    entities.append((entity_addr, pos.x, pos.y, pos.z))
+                    path = None
+                    if include_paths:
+                        path = self._read_entity_path(proc, entity_addr)
+                    if path_keywords:
+                        if path and any(kw in path.lower() for kw in keyword_lower):
+                            entities.append((entity_addr, pos.x, pos.y, pos.z, path))
+                    else:
+                        entities.append((entity_addr, pos.x, pos.y, pos.z) + ((path,) if include_paths else ()))
 
             right = self._read_pointer(proc.handle, cur + 0x10)
             if right and right > 0x10000 and right not in visited:
@@ -379,6 +402,59 @@ class MemoryReader:
                     cur = sentinel
 
         return entities
+
+    def resolve_component_index(self, proc: GameProcess, entity: int, name: str) -> Optional[int]:
+        offsets = self._nav.get("offsets", {})
+        if not offsets:
+            return None
+
+        details = self._read_ptr_at(proc.handle, entity, offsets, "entity", "details")
+        if details == 0:
+            return None
+
+        lookup = self._read_ptr_at(proc.handle, details, offsets, "entity_details", "component_lookup")
+        if lookup == 0:
+            return None
+
+        bucket_off = offsets["component_lookup"]["name_bucket"]
+        begin = self._read_pointer(proc.handle, lookup + bucket_off)
+        end = self._read_pointer(proc.handle, lookup + bucket_off + 0x08)
+        if begin == 0 or end == 0:
+            return None
+
+        stride = offsets["component_lookup"]["entry_stride"]
+        count = (end - begin) // stride
+
+        for i in range(count):
+            entry = begin + i * stride
+            name_ptr = self._read_pointer(proc.handle, entry)
+            if name_ptr == 0:
+                continue
+            comp_name = self._read_utf16_string(proc.handle, name_ptr)
+            if comp_name == name:
+                idx = self._read_int32(proc.handle, entry + 0x08)
+                logger.debug("Found component '%s' at index %d.", name, idx)
+                return idx
+
+        return None
+
+    def _read_entity_path(self, proc: GameProcess, entity: int) -> Optional[str]:
+        path_cfg = self._nav.get("entity_path", {})
+        if not path_cfg:
+            return None
+
+        chain = path_cfg.get("chain")
+        if not chain:
+            return None
+
+        addr = entity
+        for step in chain[:-1]:
+            addr = self._read_pointer(proc.handle, addr + step)
+            if addr == 0:
+                return None
+
+        last_offset = chain[-1]
+        return self._read_utf16_string(proc.handle, addr + last_offset)
 
     def close_all(self) -> None:
         for pid, proc in list(self._processes.items()):
@@ -468,72 +544,14 @@ class MemoryReader:
     # ── component name resolution ─────────────────────────────────
 
     def _resolve_render_index(self, proc: GameProcess, entity: int) -> Optional[int]:
-        offsets = self._nav["offsets"]
-        target = self._nav.get("render_component_name", "Render")
-
-        details = self._read_ptr_at(proc.handle, entity, offsets, "entity", "details")
-        if details == 0:
-            return None
-
-        lookup = self._read_ptr_at(proc.handle, details, offsets, "entity_details", "component_lookup")
-        if lookup == 0:
-            return None
-
-        bucket_off = offsets["component_lookup"]["name_bucket"]
-        begin = self._read_pointer(proc.handle, lookup + bucket_off)
-        end = self._read_pointer(proc.handle, lookup + bucket_off + 0x08)
-        if begin == 0 or end == 0:
-            return None
-
-        stride = offsets["component_lookup"]["entry_stride"]
-        count = (end - begin) // stride
-
-        for i in range(count):
-            entry = begin + i * stride
-            name_ptr = self._read_pointer(proc.handle, entry)
-            if name_ptr == 0:
-                continue
-            name = self._read_utf16_string(proc.handle, name_ptr)
-            if name == target:
-                idx = self._read_int32(proc.handle, entry + 0x08)
-                logger.info("Found component '%s' at index %d.", target, idx)
-                return idx
-
-        logger.warning("Component '%s' not found in ComponentLookUp.", target)
-        return None
+        return self.resolve_component_index(
+            proc, entity, self._nav.get("render_component_name", "Render")
+        )
 
     def _resolve_life_index(self, proc: GameProcess, entity: int) -> Optional[int]:
-        offsets = self._nav["offsets"]
-        target = self._nav.get("life_component_name", "Life")
-
-        details = self._read_ptr_at(proc.handle, entity, offsets, "entity", "details")
-        if details == 0:
-            return None
-
-        lookup = self._read_ptr_at(proc.handle, details, offsets, "entity_details", "component_lookup")
-        if lookup == 0:
-            return None
-
-        bucket_off = offsets["component_lookup"]["name_bucket"]
-        begin = self._read_pointer(proc.handle, lookup + bucket_off)
-        end = self._read_pointer(proc.handle, lookup + bucket_off + 0x08)
-        if begin == 0 or end == 0:
-            return None
-
-        stride = offsets["component_lookup"]["entry_stride"]
-        count = (end - begin) // stride
-
-        for i in range(count):
-            entry = begin + i * stride
-            name_ptr = self._read_pointer(proc.handle, entry)
-            if name_ptr == 0:
-                continue
-            name = self._read_utf16_string(proc.handle, name_ptr)
-            if name == target:
-                idx = self._read_int32(proc.handle, entry + 0x08)
-                return idx
-
-        return None
+        return self.resolve_component_index(
+            proc, entity, self._nav.get("life_component_name", "Life")
+        )
 
     def read_health(self, proc: GameProcess, entity_addr: int) -> Optional[HealthData]:
         offsets = self._nav.get("offsets", {})

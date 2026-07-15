@@ -68,6 +68,49 @@ nav:
   # Render component name — utf-16 string to match in ComponentLookUp
   render_component_name: "Render"
 
+  # Entity path reading — pointer chain from entity to UTF-16 path string.
+  # Each step: read pointer at current + offset, then advance. Last step: read string.
+  #  [0x00, 0x00] = read ptr at entity+0x00, then read string at that ptr+0x00.
+  entity_path:
+    chain: [0x08, 0x00]        # entity → EntityDetails(+0x08) → path string(+0x00)
+
+  # Portal detection: keywords matched against entity path (case-insensitive).
+  # When a portal entity appears near the Leader, Followers auto-navigate and click.
+  portal:
+    enabled: true
+    entity_path_keywords:        # case-insensitive substrings matched in entity path
+      - "portal"
+      - "townportal"
+      - "areatransition"
+    interact_key: "LMB"          # "LMB" = left mouse click; or keyboard key like "F"
+    interact_radius: 4.0         # world units — click when follower is this close
+    detection_radius: 100.0      # world units — only detect portals near Leader
+    click_repeat_delay: 1.5      # seconds between repeated click attempts
+
+  # Auto flask: inject flask keys when HP falls below threshold.
+  # Life/mana flasks in PoE2 refill from charges — pressing when low ensures
+  # followers stay alive during combat without manual intervention.
+  flask:
+    enabled: true
+    hp_threshold: 0.50           # use flask when HP ratio < 50%
+    mana_threshold: 0.30         # use flask when Mana ratio < 30%
+    flask_cooldown: 0.5          # seconds between flask presses
+    flask_keys: ["1", "2", "3", "4", "5"]
+
+  # Auto loot: detect ground items near follower → click to pick up.
+  # Scans entities with item path keywords and clicks when within range.
+  auto_loot:
+    enabled: true
+    entity_path_keywords:        # case-insensitive substrings in entity path
+      - "Metadata/Items"
+    pickup_radius: 8.0           # world units — click when item is this close
+    click_delay: 0.3             # seconds between pickup attempts
+
+  # Death detection: when follower health drops to 0, stop movement and
+  # flask usage until health returns (respawn). No keys injected while dead.
+  death:
+    enabled: true
+
   # --- Navigation behaviour ---
   behavior:
     # Formation following: each follower targets a different position

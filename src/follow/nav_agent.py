@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.common.logger import get_logger
+from src.core.behavior_randomizer import jitter, jitter_up, maybe, position_jitter, reseed
 from src.core.input_injector import InputInjector
 from src.core.memory_reader import EntityPosition, GameProcess, HealthData, MemoryReader, TerrainData
 from src.core.pathfinder import Pathfinder
@@ -68,6 +69,36 @@ class NavAgent:
         self._formation = behavior.get("formation", {})
         self._anti_stuck = behavior.get("anti_stuck", {})
 
+        portal_cfg = nav_config.get("portal", {})
+        self._portal_enabled = portal_cfg.get("enabled", True)
+        self._portal_keywords = portal_cfg.get("entity_path_keywords", ["portal"])
+        self._portal_interact_radius = float(portal_cfg.get("interact_radius", 4.0))
+        self._portal_detection_radius = float(portal_cfg.get("detection_radius", 100.0))
+        self._portal_click_delay = float(portal_cfg.get("click_repeat_delay", 1.5))
+        self._portal_interact_key = portal_cfg.get("interact_key", "LMB")
+
+        self._portal_position: Optional[Tuple[float, float]] = None
+        self._portal_last_seen: float = 0.0
+        self._follower_entered_portal: Set[int] = set()
+        self._follower_last_click: Dict[int, float] = {}
+
+        flask_cfg = nav_config.get("flask", {})
+        self._flask_enabled = flask_cfg.get("enabled", True)
+        self._flask_hp_threshold = float(flask_cfg.get("hp_threshold", 0.50))
+        self._flask_mana_threshold = float(flask_cfg.get("mana_threshold", 0.30))
+        self._flask_cooldown = float(flask_cfg.get("flask_cooldown", 0.5))
+        self._flask_keys: List[str] = flask_cfg.get("flask_keys", ["1", "2", "3", "4", "5"])
+        self._last_flask: Dict[int, float] = {}
+
+        loot_cfg = nav_config.get("auto_loot", {})
+        self._loot_enabled = loot_cfg.get("enabled", True)
+        self._loot_keywords: List[str] = loot_cfg.get("entity_path_keywords", ["Metadata/Items"])
+        self._loot_pickup_radius = float(loot_cfg.get("pickup_radius", 8.0))
+        self._loot_click_delay = float(loot_cfg.get("click_delay", 0.3))
+
+        self._death_enabled = nav_config.get("death", {}).get("enabled", True)
+        self._follower_dead: Set[int] = set()
+
         self._stuck_counters: Dict[int, int] = {}
         self._stuck_levels: Dict[int, int] = {}
         self._reverse_remaining: Dict[int, int] = {}
@@ -81,6 +112,14 @@ class NavAgent:
         self._running = True
         self._resolve_pids()
         self._build_follower_indices()
+
+        reseed()
+
+        self._portal_position = None
+        self._follower_entered_portal.clear()
+        self._follower_last_click.clear()
+        self._last_flask.clear()
+        self._follower_dead.clear()
 
         if self._leader_pid is None:
             logger.error("Leader PID not found.")
@@ -113,7 +152,7 @@ class NavAgent:
         try:
             while self._running:
                 self._tick()
-                time.sleep(TICK_INTERVAL)
+                time.sleep(jitter(TICK_INTERVAL, 0.25))
         except KeyboardInterrupt:
             logger.info("NavAgent interrupted.")
         finally:
@@ -144,6 +183,7 @@ class NavAgent:
             self._load_terrain(leader_proc)
 
         self._load_entities(leader_proc)
+        self._detect_portal(leader_proc, leader_pos)
 
         self._emit_leader(leader_pos, leader_health)
 
@@ -162,9 +202,23 @@ class NavAgent:
             if follower_entity:
                 follower_health = self._reader.read_health(proc, follower_entity)
 
-            formation_target = self._apply_formation_offset(
-                hwnd, leader_pos.x, leader_pos.y
-            )
+            if self._handle_death(hwnd, follower_health):
+                continue
+
+            if follower_health is not None:
+                self._handle_flask(hwnd, follower_health)
+
+            self._handle_loot(hwnd, proc, follower_pos)
+
+            portal_active = self._portal_position is not None
+            if portal_active and hwnd not in self._follower_entered_portal:
+                formation_target = self._portal_position
+                self._handle_portal_entry(hwnd, follower_pos)
+            else:
+                formation_target = self._apply_formation_offset(
+                    hwnd, leader_pos.x, leader_pos.y
+                )
+
             wasd = self._compute_wasd(
                 hwnd, formation_target, follower_pos, leader_pos
             )
@@ -264,6 +318,127 @@ class NavAgent:
             if dist < threat_radius:
                 self._nearby_entities[entity_addr] = EntityPosition(ex, ey, ez)
 
+    def _handle_flask(self, hwnd: int, health: HealthData) -> None:
+        if not self._flask_enabled:
+            return
+
+        if health.ratio >= jitter(self._flask_hp_threshold, 0.15):
+            return
+
+        now = time.monotonic()
+        if now - self._last_flask.get(hwnd, 0.0) < jitter(self._flask_cooldown, 0.35):
+            return
+
+        if maybe(0.10):
+            return
+
+        self._last_flask[hwnd] = now
+
+        for key in self._flask_keys:
+            self._injector.press(hwnd, key)
+            self._injector.release(hwnd, key)
+        logger.debug("Flask used on HWND=%d (HP=%d/%d)", hwnd, health.current, health.maximum)
+
+    def _handle_death(self, hwnd: int, health: Optional[HealthData]) -> bool:
+        if not self._death_enabled:
+            return False
+
+        if health is None or health.current == 0:
+            if hwnd not in self._follower_dead:
+                self._follower_dead.add(hwnd)
+                self._injector.release_all(hwnd, self._held_keys.get(hwnd, set()))
+                self._held_keys.pop(hwnd, None)
+                logger.warning("Follower HWND=%d dead — waiting for respawn.", hwnd)
+            return True
+
+        if hwnd in self._follower_dead:
+            self._follower_dead.discard(hwnd)
+            logger.info("Follower HWND=%d respawned (HP=%d/%d).", hwnd, health.current, health.maximum)
+        return False
+
+    def _handle_loot(
+        self, hwnd: int, proc: GameProcess, follower_pos: EntityPosition,
+    ) -> None:
+        if not self._loot_enabled:
+            return
+
+        entities = self._reader.read_awake_entities_with_paths(
+            proc, path_keywords=self._loot_keywords,
+        )
+        if not entities:
+            return
+
+        for _, ex, ey, _, _ in entities:
+            dist = math.hypot(follower_pos.x - ex, follower_pos.y - ey)
+            if dist < self._loot_pickup_radius:
+                now = time.monotonic()
+                delay = jitter_up(self._loot_click_delay, 0.40)
+                if now - self._follower_last_click.get(hwnd, 0.0) >= delay:
+                    self._injector.click(hwnd)
+                    self._follower_last_click[hwnd] = now
+                    logger.debug("Loot pickup on HWND=%d at (%.1f,%.1f)", hwnd, ex, ey)
+                break
+
+    def _detect_portal(self, leader_proc: GameProcess, leader_pos: EntityPosition) -> None:
+        if not self._portal_enabled:
+            return
+        if self._portal_position is not None:
+            if not self._follower_entered_portal or len(self._follower_entered_portal) < len(self._follower_pids):
+                return
+            self._portal_position = None
+            self._follower_entered_portal.clear()
+            logger.info("Portal cleared — all followers entered.")
+            return
+
+        entities = self._reader.read_awake_entities_with_paths(
+            leader_proc, path_keywords=self._portal_keywords,
+        )
+        if not entities:
+            return
+
+        best_dist = float("inf")
+        best_pos = None
+        for entity_addr, ex, ey, ez, path in entities:
+            dist = math.hypot(ex - leader_pos.x, ey - leader_pos.y)
+            if dist < self._portal_detection_radius and dist < best_dist:
+                best_dist = dist
+                best_pos = (ex, ey)
+
+        if best_pos is not None:
+            self._portal_position = best_pos
+            self._follower_entered_portal.clear()
+            self._follower_last_click.clear()
+            logger.info(
+                "Portal detected near Leader at (%.1f, %.1f) — %d follower(s) will enter.",
+                best_pos[0], best_pos[1], len(self._follower_pids),
+            )
+            self._emit_state("Portal detected — followers entering...")
+
+    def _handle_portal_entry(
+        self, hwnd: int, follower_pos: EntityPosition,
+    ) -> None:
+        if self._portal_position is None:
+            return
+        if hwnd in self._follower_entered_portal:
+            return
+
+        px, py = self._portal_position
+        dist = math.hypot(follower_pos.x - px, follower_pos.y - py)
+
+        if dist < self._portal_interact_radius:
+            now = time.monotonic()
+            last = self._follower_last_click.get(hwnd, 0.0)
+            delay = jitter(self._portal_click_delay, 0.25)
+            if now - last >= delay:
+                if self._portal_interact_key == "LMB":
+                    self._injector.click(hwnd)
+                else:
+                    self._injector.press(hwnd, self._portal_interact_key)
+                    self._injector.release(hwnd, self._portal_interact_key)
+                self._follower_last_click[hwnd] = now
+                logger.info("Follower HWND=%d clicked portal at (%.1f, %.1f).", hwnd, px, py)
+            self._follower_entered_portal.add(hwnd)
+
     def _resolve_pids(self) -> None:
         all_pids = self._reader.find_poe2_processes()
         hwnd_to_pid: Dict[int, int] = {}
@@ -307,6 +482,11 @@ class NavAgent:
         self._follower_indices.clear()
         self._cur_leader_pos = None
         self._terrain_loaded = False
+        self._portal_position = None
+        self._follower_entered_portal.clear()
+        self._follower_last_click.clear()
+        self._last_flask.clear()
+        self._follower_dead.clear()
 
         self._resolve_pids()
         self._build_follower_indices()
@@ -337,7 +517,9 @@ class NavAgent:
             index = 0
         ox, oy = offsets[index]
         spacing = float(self._formation.get("spacing", 35.0))
-        return (leader_x + ox * spacing, leader_y + oy * spacing)
+        tx = leader_x + ox * spacing
+        ty = leader_y + oy * spacing
+        return position_jitter(tx, ty, 4.0)
 
     def _check_anti_stuck(
         self,
@@ -354,7 +536,7 @@ class NavAgent:
             self._last_positions[hwnd] = follower
             return None
 
-        threshold = float(self._anti_stuck.get("distance_threshold", 2.0))
+        threshold = jitter(float(self._anti_stuck.get("distance_threshold", 2.0)), 0.15)
         dx = follower.x - prev.x
         dy = follower.y - prev.y
         moved = (dx * dx + dy * dy) ** 0.5
