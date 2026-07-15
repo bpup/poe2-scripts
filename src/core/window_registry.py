@@ -1,10 +1,29 @@
 import platform
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import Dict, List
 
 from src.common.logger import get_logger
-from src.core.party_state import WindowBinding, WindowStatus
 
 logger = get_logger(__name__)
+
+
+class WindowStatus(Enum):
+    READY = "ready"
+    MISSING = "missing"
+    MISMATCH = "mismatch"
+
+
+@dataclass
+class WindowBinding:
+    role_id: str
+    role_type: str
+    window_title: str
+    handle: str = ""
+    width: int = 0
+    height: int = 0
+    scale: float = 1.0
+    status: WindowStatus = WindowStatus.MISSING
 
 SYSTEM = platform.system()
 _HAS_WIN32 = False
