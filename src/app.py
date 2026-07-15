@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import queue
 import logging
-from pathlib import Path
 from typing import Optional
 
 from src.common.config_loader import load_config
 from src.common.gui_log_handler import GuiLogHandler
 from src.common.logger import ROOT_LOGGER_NAME, get_logger
+from src.common.runtime_paths import resource_root
 from src.core.window_registry import WindowRegistry
 from src.follow.nav_agent import NavAgent
 from src.ui.gui import NavGui, select_windows
@@ -16,8 +16,7 @@ logger = get_logger(__name__)
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parent.parent
-    config_path = project_root / "config" / "nav-follow.yaml"
+    config_path = resource_root() / "config" / "nav-follow.yaml"
     config = load_config(str(config_path))
 
     registry = WindowRegistry()
