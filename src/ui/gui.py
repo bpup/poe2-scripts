@@ -1,16 +1,153 @@
 from __future__ import annotations
 
 import queue
-import threading
 import tkinter as tk
-from tkinter import ttk
-from typing import Any, Dict, List, Optional
+from tkinter import messagebox, ttk
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.gui_log_handler import GuiLogHandler, LogPanel
-from src.common.logger import get_logger, setup_logging
-from src.core.memory_reader import EntityPosition
+from src.common.logger import get_logger
+from src.core.memory_reader import EntityPosition, HealthData
 
 logger = get_logger(__name__)
+
+
+# ── Window Selector Dialog ──────────────────────────────────────
+
+_WindowEntry = Dict[str, Any]
+
+
+def select_windows(windows: List[_WindowEntry]) -> Optional[Tuple[int, List[int]]]:
+    """Show a modal dialog to pick the Leader window and confirm Followers.
+
+    Returns ``(leader_hwnd, follower_hwnds)`` or ``None`` if cancelled.
+    """
+    root = tk.Tk()
+    root.withdraw()
+
+    dialog = _WindowSelectorDialog(root, windows)
+    root.wait_window(dialog)
+
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+    return dialog.result
+
+
+class _WindowSelectorDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk, windows: List[_WindowEntry]) -> None:
+        super().__init__(parent)
+        self.title("Select PoE2 Windows")
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        self._windows = windows
+        self._leader_var = tk.StringVar()
+        self._follower_vars: Dict[str, tk.BooleanVar] = {}
+        self.result: Optional[Tuple[int, List[int]]] = None
+
+        self._build_ui()
+        self.grab_set()
+
+    # ── UI ─────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        frame = ttk.Frame(self, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text=f"Found {len(self._windows)} PoE2 window(s). Select one Leader, "
+                 "then choose Followers:",
+            wraplength=420,
+        ).grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 8))
+
+        # header row
+        ttk.Label(frame, text="Leader", font=("", 9, "bold")).grid(
+            row=1, column=0, padx=4
+        )
+        ttk.Label(frame, text="Follow", font=("", 9, "bold")).grid(
+            row=1, column=1, padx=4
+        )
+        ttk.Label(frame, text="HWND", font=("", 9, "bold")).grid(
+            row=1, column=2, padx=4, sticky=tk.W
+        )
+        ttk.Label(frame, text="Window Title", font=("", 9, "bold")).grid(
+            row=1, column=3, padx=4, sticky=tk.W
+        )
+
+        sep = ttk.Separator(frame, orient=tk.HORIZONTAL)
+        sep.grid(row=2, column=0, columnspan=5, sticky=tk.EW, pady=2)
+
+        for i, win in enumerate(self._windows):
+            hwnd_str = win["handle"]
+            title = win.get("title", "")
+            row = i + 3
+
+            # leader radio — first window pre-selected
+            rb = ttk.Radiobutton(
+                frame, variable=self._leader_var, value=hwnd_str,
+            )
+            if i == 0:
+                rb.invoke()
+            rb.grid(row=row, column=0, padx=4)
+
+            # follower checkbox — all checked by default
+            var = tk.BooleanVar(value=True)
+            self._follower_vars[hwnd_str] = var
+            cb = ttk.Checkbutton(frame, variable=var)
+            cb.grid(row=row, column=1, padx=4)
+
+            ttk.Label(frame, text=hwnd_str).grid(row=row, column=2, padx=4, sticky=tk.W)
+            ttk.Label(frame, text=title[:60]).grid(row=row, column=3, padx=4, sticky=tk.W)
+
+        # ── buttons ──────────────────────────────────────
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=len(self._windows) + 3, column=0, columnspan=5,
+                       pady=(12, 0), sticky=tk.E)
+
+        ttk.Button(btn_frame, text="OK", command=self._on_confirm).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(
+            side=tk.LEFT, padx=4
+        )
+
+    # ── callbacks ─────────────────────────────────────────
+
+    def _on_confirm(self) -> None:
+        leader_str = self._leader_var.get()
+        if not leader_str:
+            messagebox.showwarning(
+                "No Leader", "Please select one Leader window.", parent=self,
+            )
+            return
+
+        leader_hwnd = int(leader_str)
+
+        follower_hwnds: List[int] = []
+        for win in self._windows:
+            hwnd_str = win["handle"]
+            hwnd_int = int(hwnd_str)
+            if hwnd_int == leader_hwnd:
+                continue
+            if self._follower_vars.get(hwnd_str, tk.BooleanVar(value=False)).get():
+                follower_hwnds.append(hwnd_int)
+
+        if not follower_hwnds:
+            messagebox.showwarning(
+                "No Followers", "Please select at least one Follower.", parent=self,
+            )
+            return
+
+        self.result = (leader_hwnd, follower_hwnds)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
 
 
 class FollowerTracker:
@@ -24,6 +161,7 @@ class FollowerTracker:
         "stuck_counter",
         "reverse_remaining",
         "wasd",
+        "health",
     )
 
     def __init__(self, hwnd: int, pid: int, index: int) -> None:
@@ -36,6 +174,7 @@ class FollowerTracker:
         self.stuck_counter = 0
         self.reverse_remaining = 0
         self.wasd: str = ""
+        self.health: Optional[HealthData] = None
 
 
 class NavGui:
@@ -94,7 +233,7 @@ class NavGui:
         frame = ttk.LabelFrame(self._root, text="Followers", padding=4)
         frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
 
-        columns = ("idx", "hwnd", "pid", "pos", "fmt_target", "stuck", "wasd")
+        columns = ("idx", "hwnd", "pid", "pos", "fmt_target", "stuck", "wasd", "health")
         self._tree = ttk.Treeview(
             frame, columns=columns, show="headings", height=6
         )
@@ -105,6 +244,7 @@ class NavGui:
         self._tree.heading("fmt_target", text="Formation Target", anchor=tk.W)
         self._tree.heading("stuck", text="Stuck Lvl/Cnt/Rev", anchor=tk.CENTER)
         self._tree.heading("wasd", text="Keys", anchor=tk.CENTER)
+        self._tree.heading("health", text="HP", anchor=tk.CENTER)
 
         self._tree.column("idx", width=30, anchor=tk.CENTER)
         self._tree.column("hwnd", width=60, anchor=tk.CENTER)
@@ -113,6 +253,7 @@ class NavGui:
         self._tree.column("fmt_target", width=140, anchor=tk.W)
         self._tree.column("stuck", width=90, anchor=tk.CENTER)
         self._tree.column("wasd", width=60, anchor=tk.CENTER)
+        self._tree.column("health", width=85, anchor=tk.CENTER)
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=scrollbar.set)
@@ -124,7 +265,7 @@ class NavGui:
                 "",
                 tk.END,
                 iid=str(f.hwnd),
-                values=(f.index, f.hwnd, f.pid or "--", "--", "--", "--", ""),
+                values=(f.index, f.hwnd, f.pid or "--", "--", "--", "--", "", "--"),
             )
 
     def _build_button_bar(self) -> None:
@@ -189,10 +330,16 @@ class NavGui:
 
     def _update_leader(self, msg: dict) -> None:
         pos = msg.get("pos")
+        health = msg.get("health")
+        hp_str = ""
+        if isinstance(health, HealthData):
+            hp_str = f"  HP: {health.current}/{health.maximum} ({health.ratio:.0%})"
+        elif isinstance(health, dict):
+            hp_str = f"  HP: {health.get('current','?')}/{health.get('maximum','?')}"
         if pos:
             self._leader_label.configure(
                 text=f"HWND={self._leader_hwnd}  PID={self._leader_pid}  "
-                f"Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f})"
+                f"Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}){hp_str}"
             )
         else:
             self._leader_label.configure(
@@ -221,6 +368,14 @@ class NavGui:
             wasd = item.get("wasd", "")
             wasd_str = "".join(sorted(wasd)) if wasd else "—"
 
+            health = item.get("health")
+            if isinstance(health, HealthData):
+                hp_str = f"{health.current}/{health.maximum}"
+            elif isinstance(health, dict):
+                hp_str = f"{health.get('current','?')}/{health.get('maximum','?')}"
+            else:
+                hp_str = "--"
+
             tk_id = str(hwnd)
             if tk_id in self._tree.get_children():
                 self._tree.item(tk_id, values=(
@@ -231,6 +386,7 @@ class NavGui:
                     fmt_str,
                     stuck_str,
                     wasd_str,
+                    hp_str,
                 ))
 
     def mainloop(self) -> None:

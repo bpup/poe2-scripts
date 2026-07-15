@@ -10,7 +10,7 @@ from src.common.gui_log_handler import GuiLogHandler
 from src.common.logger import ROOT_LOGGER_NAME, get_logger
 from src.core.window_registry import WindowRegistry
 from src.follow.nav_agent import NavAgent
-from src.ui.gui import NavGui
+from src.ui.gui import NavGui, select_windows
 
 logger = get_logger(__name__)
 
@@ -29,8 +29,12 @@ def main() -> None:
         )
         return
 
-    leader_hwnd = all_windows[0]
-    follower_hwnds = all_windows[1:]
+    selection = select_windows(all_windows)
+    if selection is None:
+        logger.info("Window selection cancelled.")
+        return
+
+    leader_hwnd, follower_hwnds = selection
 
     log_handler = GuiLogHandler(level=logging.DEBUG)
     log_handler.setFormatter(

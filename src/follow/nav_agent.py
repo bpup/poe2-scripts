@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import queue
 import threading
 import time
@@ -7,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.common.logger import get_logger
 from src.core.input_injector import InputInjector
-from src.core.memory_reader import EntityPosition, GameProcess, MemoryReader
+from src.core.memory_reader import EntityPosition, GameProcess, HealthData, MemoryReader, TerrainData
 from src.core.pathfinder import Pathfinder
 from src.core.window_registry import WindowRegistry
 from src.core.window_registry import WindowStatus as WinStatus
@@ -48,6 +49,9 @@ class NavAgent:
         self._pathfinder = Pathfinder()
         self._registry = WindowRegistry()
 
+        self._terrain_loaded = False
+        self._nearby_entities: Dict[int, List[EntityPosition]] = {}
+
         self._leader_hwnd = leader_hwnd
         self._follower_hwnds = follower_hwnds
         self._status_queue = status_queue
@@ -58,6 +62,7 @@ class NavAgent:
 
         self._held_keys: Dict[int, Set[str]] = {}
         self._last_positions: Dict[int, EntityPosition] = {}
+        self._cur_leader_pos: Optional[EntityPosition] = None
 
         behavior = nav_config.get("behavior", {})
         self._formation = behavior.get("formation", {})
@@ -66,6 +71,8 @@ class NavAgent:
         self._stuck_counters: Dict[int, int] = {}
         self._stuck_levels: Dict[int, int] = {}
         self._reverse_remaining: Dict[int, int] = {}
+        self._consecutive_failures: int = 0
+        self._max_consecutive_failures: int = 30
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -117,13 +124,28 @@ class NavAgent:
     def _tick(self) -> None:
         leader_proc = self._reader.open_process(self._leader_pid)
         if leader_proc is None:
+            self._handle_read_failure()
             return
 
-        leader_pos = self._reader.read_local_player_position(leader_proc)
-        if leader_pos is None:
+        result = self._reader.read_local_player_position(leader_proc)
+        if result is None:
+            self._handle_read_failure()
             return
+        self._consecutive_failures = 0
+        leader_pos, leader_entity = result
 
-        self._emit_leader(leader_pos)
+        leader_health: Optional[HealthData] = None
+        if leader_entity:
+            leader_health = self._reader.read_health(leader_proc, leader_entity)
+
+        self._cur_leader_pos = leader_pos
+
+        if not self._terrain_loaded:
+            self._load_terrain(leader_proc)
+
+        self._load_entities(leader_proc)
+
+        self._emit_leader(leader_pos, leader_health)
 
         follower_data: List[dict] = []
         for hwnd, pid in self._follower_pids.items():
@@ -131,9 +153,14 @@ class NavAgent:
             if proc is None:
                 continue
 
-            follower_pos = self._reader.read_local_player_position(proc)
-            if follower_pos is None:
+            result_f = self._reader.read_local_player_position(proc)
+            if result_f is None:
                 continue
+            follower_pos, follower_entity = result_f
+
+            follower_health: Optional[HealthData] = None
+            if follower_entity:
+                follower_health = self._reader.read_health(proc, follower_entity)
 
             formation_target = self._apply_formation_offset(
                 hwnd, leader_pos.x, leader_pos.y
@@ -154,6 +181,7 @@ class NavAgent:
                 "stuck_counter": self._stuck_counters.get(hwnd, 0),
                 "reverse_remaining": self._reverse_remaining.get(hwnd, 0),
                 "wasd": "".join(sorted(wasd)) if wasd else "",
+                "health": follower_health,
             })
 
         if follower_data:
@@ -170,15 +198,28 @@ class NavAgent:
         if anti_stuck is not None:
             return anti_stuck
 
-        dx = target[0] - follower.x
-        dy = follower.y - target[1]
+        tx, ty = target[0], target[1]
+
+        avoid_dx, avoid_dy = 0.0, 0.0
+        min_dist = 100.0
+        for _, ent in self._nearby_entities.items():
+            edx = follower.x - ent.x
+            edy = follower.y - ent.y
+            edist = (edx * edx + edy * edy) ** 0.5
+            if 0 < edist < min_dist:
+                strength = (min_dist - edist) / min_dist
+                avoid_dx += (edx / edist) * strength * 150.0
+                avoid_dy += (edy / edist) * strength * 150.0
+
+        dx = (tx + avoid_dx) - follower.x
+        dy = follower.y - (ty + avoid_dy)
         dist = (dx * dx + dy * dy) ** 0.5
 
         if dist < 1.0:
             return set()
 
         return self._pathfinder.to_wasd(
-            follower.x, follower.y, target[0], target[1],
+            follower.x, follower.y, tx + avoid_dx, ty + avoid_dy,
         )
 
     def _apply_keys(self, hwnd: int, desired: Set[str]) -> None:
@@ -193,12 +234,41 @@ class NavAgent:
 
         self._held_keys[hwnd] = desired
 
+    def _load_terrain(self, leader_proc: GameProcess) -> None:
+        terrain: Optional[TerrainData] = self._reader.read_terrain_grid(leader_proc)
+        if terrain is None:
+            return
+
+        self._pathfinder = Pathfinder(grid=terrain.grid, cell_size=terrain.cell_size)
+        self._terrain_loaded = True
+        logger.info(
+            "Terrain grid loaded: %dx%d (%d walkable cells).",
+            terrain.cells_per_row,
+            terrain.num_rows,
+            sum(1 for row in terrain.grid for c in row if c == 0),
+        )
+
+    def _load_entities(self, leader_proc: GameProcess) -> None:
+        raw = self._reader.read_awake_entities(leader_proc)
+        if not raw:
+            return
+
+        self._nearby_entities.clear()
+        leader_pos = self._cur_leader_pos
+        if leader_pos is None:
+            return
+
+        threat_radius = 400.0
+        for entity_addr, ex, ey, ez in raw:
+            dist = math.hypot(ex - leader_pos.x, ey - leader_pos.y)
+            if dist < threat_radius:
+                self._nearby_entities[entity_addr] = EntityPosition(ex, ey, ez)
+
     def _resolve_pids(self) -> None:
         all_pids = self._reader.find_poe2_processes()
         hwnd_to_pid: Dict[int, int] = {}
 
         for pid in all_pids:
-            proc_handle = self._reader._get_module_base
             for hwnd in [self._leader_hwnd] + self._follower_hwnds:
                 if hwnd in hwnd_to_pid:
                     continue
@@ -218,6 +288,39 @@ class NavAgent:
                 self._follower_pids[hwnd] = hwnd_to_pid[hwnd]
             else:
                 logger.warning("No PoE2 process found for HWND %d.", hwnd)
+
+    def _handle_read_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            logger.warning(
+                "Leader read failed %d consecutive ticks — attempting process recovery.",
+                self._consecutive_failures,
+            )
+            self._recover_processes()
+            self._consecutive_failures = 0
+
+    def _recover_processes(self) -> None:
+        self._reader.close_all()
+        self._reader.reset_caches()
+        self._leader_pid = None
+        self._follower_pids.clear()
+        self._follower_indices.clear()
+        self._cur_leader_pos = None
+        self._terrain_loaded = False
+
+        self._resolve_pids()
+        self._build_follower_indices()
+
+        if self._leader_pid is not None and self._follower_pids:
+            logger.info(
+                "Process recovery OK: leader PID=%d, %d followers.",
+                self._leader_pid,
+                len(self._follower_pids),
+            )
+            self._emit_state("Reconnected.")
+        else:
+            logger.error("Process recovery failed — no PoE2 processes found.")
+            self._emit_state("Recovery failed — waiting for PoE2 processes...")
 
     def _build_follower_indices(self) -> None:
         for index, hwnd in enumerate(self._follower_hwnds):
@@ -325,10 +428,13 @@ class NavAgent:
         except queue.Full:
             pass
 
-    def _emit_leader(self, pos: EntityPosition) -> None:
+    def _emit_leader(self, pos: EntityPosition, health: Optional[HealthData] = None) -> None:
         if self._status_queue is None:
             return
         try:
-            self._status_queue.put_nowait({"type": "leader", "pos": pos})
+            msg: dict = {"type": "leader", "pos": pos}
+            if health is not None:
+                msg["health"] = health
+            self._status_queue.put_nowait(msg)
         except queue.Full:
             pass

@@ -39,7 +39,12 @@ nav:
     in_game_state:
       area_instance: 0x290        # → AreaInstance
     area_instance:
-      local_player: 0x5B8         # → player Entity
+      awake_entities: 0x6D8     # → std::map<uint, Entity*> (all spawned entities)
+      local_player: 0x5B8       # → player Entity
+      terrain_metadata: 0x8B8   # → TerrainMetadata (walkable grid + tile info)
+    terrain_metadata:
+      walkable_data: 0xD0         # IntPtr → byte array (walkable grid, 2 cells/byte)
+      bytes_per_row: 0x130        # int; cellsPerRow = bytes_per_row * 2 (621 → 1242)
     entity:
       details: 0x08               # → EntityDetails
       component_list: 0x10        # StdVector<IntPtr> — indexed by ComponentLookUp
