@@ -112,6 +112,8 @@ class HealthData:
     current: int
     maximum: int
     ratio: float
+    es_current: int = 0
+    es_maximum: int = 0
 
 
 class MemoryReader:
@@ -169,7 +171,7 @@ class MemoryReader:
         logger.info("Found %d PoE2 processes: %s.", len(found), found)
         return found
 
-    def read_local_player_position(self, proc: GameProcess) -> Optional[Tuple[EntityPosition, int]]:
+    def read_local_player_position(self, proc: GameProcess) -> Optional[Tuple[EntityPosition, int, int]]:
         offsets = self._nav.get("offsets", {})
         if not offsets:
             return None
@@ -202,7 +204,7 @@ class MemoryReader:
         pos = self._read_entity_position(proc, player_entity)
         if pos is None:
             return None
-        return (pos, player_entity)
+        return (pos, player_entity, area_instance)
 
     def read_terrain_grid(self, proc: GameProcess) -> Optional[TerrainData]:
         offsets = self._nav.get("offsets", {})
@@ -579,7 +581,21 @@ class MemoryReader:
         if maximum <= 0 or current < 0:
             return None
 
-        return HealthData(current=current, maximum=maximum, ratio=current / maximum)
+        es_current = 0
+        es_maximum = 0
+        es_offset = offsets.get("life_component", {}).get("energy_shield")
+        if es_offset is not None:
+            es_vital = life_component + es_offset
+            raw_es_cur = self._read_int32(proc.handle, es_vital + 0x30)
+            raw_es_max = self._read_int32(proc.handle, es_vital + 0x2C)
+            if raw_es_max > 0 and raw_es_cur >= 0:
+                es_current = raw_es_cur
+                es_maximum = raw_es_max
+
+        return HealthData(
+            current=current, maximum=maximum, ratio=current / maximum,
+            es_current=es_current, es_maximum=es_maximum,
+        )
 
     # ── offset helpers ────────────────────────────────────────────
 

@@ -62,6 +62,7 @@ def main() -> None:
             leader_hwnd=leader_hwnd,
             follower_hwnds=follower_hwnds,
             status_queue=status_queue,
+            config_path=str(config_path),
         )
         agent_ref[0] = agent
         agent.start()
@@ -72,6 +73,11 @@ def main() -> None:
             agent.stop()
             agent_ref[0] = None
 
+    def on_pause_toggle(hwnd: int, paused: bool) -> None:
+        agent = agent_ref[0]
+        if agent is not None:
+            agent.set_paused(hwnd, paused)
+
     gui = NavGui(
         status_queue=status_queue,
         log_handler=log_handler,
@@ -81,6 +87,7 @@ def main() -> None:
         follower_pids={},
         on_start=on_start,
         on_stop=on_stop,
+        on_pause_toggle=on_pause_toggle,
     )
     gui.mainloop()
 

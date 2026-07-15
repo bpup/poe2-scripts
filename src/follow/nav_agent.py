@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 import time
@@ -19,6 +20,7 @@ logger = get_logger(__name__)
 TICK_INTERVAL = 0.05
 STUCK_THRESHOLD = 5.0
 STUCK_STEPS = 5
+_CONFIG_RELOAD_INTERVAL = 50  # ticks between config hot-reload checks (~2.5 s)
 UNSTUCK_VECTORS = [
     (1.0, 0.0),
     (-1.0, 0.0),
@@ -44,6 +46,7 @@ class NavAgent:
         leader_hwnd: int,
         follower_hwnds: List[int],
         status_queue: Optional[queue.Queue[dict]] = None,
+        config_path: Optional[str] = None,
     ) -> None:
         self._reader = MemoryReader(nav_config)
         self._injector = InputInjector()
@@ -105,6 +108,17 @@ class NavAgent:
         self._consecutive_failures: int = 0
         self._max_consecutive_failures: int = 30
 
+        # Per-follower pause (set from GUI thread; GIL makes set ops safe)
+        self._paused_hwnds: Set[int] = set()
+
+        # Area transition detection — terrain reloads on area_instance pointer change
+        self._last_area_ptr: Optional[int] = None
+
+        # Config hot-reload
+        self._config_path: Optional[str] = config_path
+        self._config_mtime: float = 0.0
+        self._reload_tick_counter: int = 0
+
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -120,6 +134,13 @@ class NavAgent:
         self._follower_last_click.clear()
         self._last_flask.clear()
         self._follower_dead.clear()
+        self._last_area_ptr = None
+        self._reload_tick_counter = 0
+        if self._config_path:
+            try:
+                self._config_mtime = os.path.getmtime(self._config_path)
+            except OSError:
+                self._config_mtime = 0.0
 
         if self._leader_pid is None:
             logger.error("Leader PID not found.")
@@ -171,7 +192,24 @@ class NavAgent:
             self._handle_read_failure()
             return
         self._consecutive_failures = 0
-        leader_pos, leader_entity = result
+        leader_pos, leader_entity, area_ptr = result
+
+        # Detect area transitions — reset terrain grid and portal state
+        if area_ptr and area_ptr != self._last_area_ptr:
+            if self._last_area_ptr is not None:
+                logger.info(
+                    "Area transition detected (0x%X → 0x%X) — resetting terrain, portal and stuck state.",
+                    self._last_area_ptr, area_ptr,
+                )
+                self._terrain_loaded = False
+                self._pathfinder = Pathfinder()
+                self._portal_position = None
+                self._follower_entered_portal.clear()
+                self._follower_last_click.clear()
+                self._stuck_counters.clear()
+                self._stuck_levels.clear()
+                self._reverse_remaining.clear()
+            self._last_area_ptr = area_ptr
 
         leader_health: Optional[HealthData] = None
         if leader_entity:
@@ -196,11 +234,32 @@ class NavAgent:
             result_f = self._reader.read_local_player_position(proc)
             if result_f is None:
                 continue
-            follower_pos, follower_entity = result_f
+            follower_pos, follower_entity, _ = result_f
 
             follower_health: Optional[HealthData] = None
             if follower_entity:
                 follower_health = self._reader.read_health(proc, follower_entity)
+
+            idx = self._follower_indices.get(hwnd, 0)
+
+            # If this follower is paused, release all held keys and skip automation
+            if hwnd in self._paused_hwnds:
+                if self._held_keys.get(hwnd):
+                    self._injector.release_all(hwnd, self._held_keys[hwnd])
+                    self._held_keys[hwnd] = set()
+                follower_data.append({
+                    "hwnd": hwnd,
+                    "pid": pid,
+                    "index": idx,
+                    "pos": follower_pos,
+                    "fmt_target": None,
+                    "stuck_level": 0,
+                    "stuck_counter": 0,
+                    "reverse_remaining": 0,
+                    "wasd": "",
+                    "health": follower_health,
+                })
+                continue
 
             if self._handle_death(hwnd, follower_health):
                 continue
@@ -224,7 +283,6 @@ class NavAgent:
             )
             self._apply_keys(hwnd, wasd)
 
-            idx = self._follower_indices.get(hwnd, 0)
             follower_data.append({
                 "hwnd": hwnd,
                 "pid": pid,
@@ -240,6 +298,12 @@ class NavAgent:
 
         if follower_data:
             self._emit_status("followers", follower_data)
+
+        # Periodic config hot-reload check
+        self._reload_tick_counter += 1
+        if self._reload_tick_counter >= _CONFIG_RELOAD_INTERVAL:
+            self._reload_tick_counter = 0
+            self._maybe_reload_config()
 
     def _compute_wasd(
         self,
@@ -436,8 +500,8 @@ class NavAgent:
                     self._injector.press(hwnd, self._portal_interact_key)
                     self._injector.release(hwnd, self._portal_interact_key)
                 self._follower_last_click[hwnd] = now
+                self._follower_entered_portal.add(hwnd)
                 logger.info("Follower HWND=%d clicked portal at (%.1f, %.1f).", hwnd, px, py)
-            self._follower_entered_portal.add(hwnd)
 
     def _resolve_pids(self) -> None:
         all_pids = self._reader.find_poe2_processes()
@@ -482,6 +546,7 @@ class NavAgent:
         self._follower_indices.clear()
         self._cur_leader_pos = None
         self._terrain_loaded = False
+        self._last_area_ptr = None
         self._portal_position = None
         self._follower_entered_portal.clear()
         self._follower_last_click.clear()
@@ -587,6 +652,50 @@ class NavAgent:
             self._stuck_counters[hwnd] = 0
             self._stuck_levels[hwnd] = 0
         return None
+
+    def set_paused(self, hwnd: int, paused: bool) -> None:
+        """Pause or resume key injection for a single follower window.
+
+        Thread-safe under CPython (GIL protects set mutations).
+        """
+        if paused:
+            self._paused_hwnds.add(hwnd)
+            logger.info("Follower HWND=%d paused.", hwnd)
+        else:
+            self._paused_hwnds.discard(hwnd)
+            logger.info("Follower HWND=%d resumed.", hwnd)
+
+    def _maybe_reload_config(self) -> None:
+        """Re-read behavior config from disk if the file has changed."""
+        if not self._config_path:
+            return
+        try:
+            mtime = os.path.getmtime(self._config_path)
+            if mtime <= self._config_mtime:
+                return
+            self._config_mtime = mtime
+            from src.common.config_loader import load_config as _load_config  # lazy
+            new_cfg = _load_config(self._config_path)
+            if not new_cfg.nav:
+                return
+            nav = new_cfg.nav
+            behavior = nav.get("behavior", {})
+            self._formation = behavior.get("formation", self._formation)
+            self._anti_stuck = behavior.get("anti_stuck", self._anti_stuck)
+            flask_cfg = nav.get("flask", {})
+            self._flask_enabled = flask_cfg.get("enabled", self._flask_enabled)
+            self._flask_hp_threshold = float(flask_cfg.get("hp_threshold", self._flask_hp_threshold))
+            self._flask_mana_threshold = float(flask_cfg.get("mana_threshold", self._flask_mana_threshold))
+            self._flask_cooldown = float(flask_cfg.get("flask_cooldown", self._flask_cooldown))
+            self._flask_keys = flask_cfg.get("flask_keys", self._flask_keys)
+            loot_cfg = nav.get("auto_loot", {})
+            self._loot_enabled = loot_cfg.get("enabled", self._loot_enabled)
+            self._loot_pickup_radius = float(loot_cfg.get("pickup_radius", self._loot_pickup_radius))
+            self._loot_click_delay = float(loot_cfg.get("click_delay", self._loot_click_delay))
+            logger.info("Config hot-reloaded from %s.", self._config_path)
+            self._emit_state("Config reloaded.")
+        except Exception as exc:
+            logger.warning("Config hot reload failed: %s", exc)
 
     def _emergency_stop(self) -> None:
         for hwnd in list(self._held_keys.keys()):

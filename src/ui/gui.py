@@ -190,6 +190,7 @@ class NavGui:
         follower_pids: Dict[int, int],
         on_start: Any,
         on_stop: Any,
+        on_pause_toggle: Any = None,
     ) -> None:
         self._status_queue = status_queue
         self._log_handler = log_handler
@@ -203,7 +204,11 @@ class NavGui:
 
         self._on_start = on_start
         self._on_stop = on_stop
+        self._on_pause_toggle = on_pause_toggle
         self._running = False
+
+        # Per-follower pause state (source of truth for GUI display)
+        self._pause_states: Dict[int, bool] = {hwnd: False for hwnd in follower_hwnds}
 
         self._root = tk.Tk()
         self._root.title("PoE2 Auto-Follow")
@@ -233,7 +238,7 @@ class NavGui:
         frame = ttk.LabelFrame(self._root, text="Followers", padding=4)
         frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
 
-        columns = ("idx", "hwnd", "pid", "pos", "fmt_target", "stuck", "wasd", "health")
+        columns = ("idx", "hwnd", "pid", "pos", "fmt_target", "stuck", "wasd", "health", "pause")
         self._tree = ttk.Treeview(
             frame, columns=columns, show="headings", height=6
         )
@@ -244,7 +249,8 @@ class NavGui:
         self._tree.heading("fmt_target", text="Formation Target", anchor=tk.W)
         self._tree.heading("stuck", text="Stuck Lvl/Cnt/Rev", anchor=tk.CENTER)
         self._tree.heading("wasd", text="Keys", anchor=tk.CENTER)
-        self._tree.heading("health", text="HP", anchor=tk.CENTER)
+        self._tree.heading("health", text="HP / ES", anchor=tk.CENTER)
+        self._tree.heading("pause", text="Pause", anchor=tk.CENTER)
 
         self._tree.column("idx", width=30, anchor=tk.CENTER)
         self._tree.column("hwnd", width=60, anchor=tk.CENTER)
@@ -253,7 +259,8 @@ class NavGui:
         self._tree.column("fmt_target", width=140, anchor=tk.W)
         self._tree.column("stuck", width=90, anchor=tk.CENTER)
         self._tree.column("wasd", width=60, anchor=tk.CENTER)
-        self._tree.column("health", width=85, anchor=tk.CENTER)
+        self._tree.column("health", width=110, anchor=tk.CENTER)
+        self._tree.column("pause", width=50, anchor=tk.CENTER)
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=scrollbar.set)
@@ -265,8 +272,11 @@ class NavGui:
                 "",
                 tk.END,
                 iid=str(f.hwnd),
-                values=(f.index, f.hwnd, f.pid or "--", "--", "--", "--", "", "--"),
+                values=(f.index, f.hwnd, f.pid or "--", "--", "--", "--", "", "--", "▶"),
             )
+
+        # Click on the Pause column toggles per-follower pause
+        self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
     def _build_button_bar(self) -> None:
         frame = ttk.Frame(self._root)
@@ -289,7 +299,37 @@ class NavGui:
         self._log_panel = LogPanel(frame, self._log_handler, poll_ms=100, max_lines=500)
         self._log_panel.pack(fill=tk.BOTH, expand=True)
 
+    def reset_pause_states(self) -> None:
+        """Clear all per-follower pause states (called when the agent restarts)."""
+        for hwnd in list(self._pause_states):
+            self._pause_states[hwnd] = False
+        for hwnd_str in self._tree.get_children():
+            vals = list(self._tree.item(hwnd_str, "values"))
+            if len(vals) >= 9:
+                vals[8] = "▶"
+                self._tree.item(hwnd_str, values=vals)
+
+    def _on_tree_click(self, event: Any) -> None:
+        """Toggle pause state when the Pause column (#9) is clicked."""
+        col = self._tree.identify_column(event.x)
+        row = self._tree.identify_row(event.y)
+        if not row or col != "#9":
+            return
+        try:
+            hwnd = int(row)
+        except ValueError:
+            return
+        paused = not self._pause_states.get(hwnd, False)
+        self._pause_states[hwnd] = paused
+        vals = list(self._tree.item(row, "values"))
+        if len(vals) >= 9:
+            vals[8] = "⏸" if paused else "▶"
+            self._tree.item(row, values=vals)
+        if self._on_pause_toggle:
+            self._on_pause_toggle(hwnd, paused)
+
     def _do_start(self) -> None:
+        self.reset_pause_states()
         self._running = True
         self._start_btn.configure(state=tk.DISABLED)
         self._stop_btn.configure(state=tk.NORMAL)
@@ -334,6 +374,8 @@ class NavGui:
         hp_str = ""
         if isinstance(health, HealthData):
             hp_str = f"  HP: {health.current}/{health.maximum} ({health.ratio:.0%})"
+            if health.es_maximum > 0:
+                hp_str += f"  ES: {health.es_current}/{health.es_maximum}"
         elif isinstance(health, dict):
             hp_str = f"  HP: {health.get('current','?')}/{health.get('maximum','?')}"
         if pos:
@@ -371,10 +413,14 @@ class NavGui:
             health = item.get("health")
             if isinstance(health, HealthData):
                 hp_str = f"{health.current}/{health.maximum}"
+                if health.es_maximum > 0:
+                    hp_str += f" ES:{health.es_current}"
             elif isinstance(health, dict):
                 hp_str = f"{health.get('current','?')}/{health.get('maximum','?')}"
             else:
                 hp_str = "--"
+
+            pause_str = "⏸" if self._pause_states.get(hwnd, False) else "▶"
 
             tk_id = str(hwnd)
             if tk_id in self._tree.get_children():
@@ -387,6 +433,7 @@ class NavGui:
                     stuck_str,
                     wasd_str,
                     hp_str,
+                    pause_str,
                 ))
 
     def mainloop(self) -> None:
