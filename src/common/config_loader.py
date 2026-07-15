@@ -1,8 +1,10 @@
 """Configuration loader for PoE2 multi-client auto-follow."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -48,6 +50,27 @@ class PartyConfig:
     followers: List[FollowerConfig] = field(default_factory=list)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    nav: Optional[Dict[str, Any]] = None
+
+
+def _parse_aob_pattern(raw: dict) -> dict:
+    hex_str: str = raw.get("bytes", "")
+    parts = hex_str.strip().split()
+    pattern: List[int] = []  # -1 = wildcard
+    mask: List[int] = []
+    for p in parts:
+        if p in ("?", "??"):
+            pattern.append(0)
+            mask.append(0)
+        else:
+            pattern.append(int(p, 16))
+            mask.append(0xFF)
+    return {
+        "bytes": bytes(pattern),
+        "mask": bytes(mask),
+        "disp_offset": int(raw.get("disp_offset", 3)),
+        "instr_len": int(raw.get("instr_len", 7)),
+    }
 
 
 def load_config(path: str) -> PartyConfig:
@@ -67,7 +90,7 @@ def load_config(path: str) -> PartyConfig:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     if not raw:
@@ -87,18 +110,14 @@ def load_config(path: str) -> PartyConfig:
     if not isinstance(followers_raw, list):
         raise ValueError("'followers' must be a list.")
     if len(followers_raw) < 1 or len(followers_raw) > 5:
-        raise ValueError(
-            f"Expected 1-5 followers, got {len(followers_raw)}."
-        )
+        raise ValueError(f"Expected 1-5 followers, got {len(followers_raw)}.")
 
     seen_ids: set = set()
     followers: list[FollowerConfig] = []
     for i, f_raw in enumerate(followers_raw):
         f_role = f_raw.get("role_id")
         if not f_role or not isinstance(f_role, str):
-            raise ValueError(
-                f"follower[{i}].role_id must be a non-empty string."
-            )
+            raise ValueError(f"follower[{i}].role_id must be a non-empty string.")
         if f_role in seen_ids:
             raise ValueError(f"Duplicate follower role_id: {f_role}")
         seen_ids.add(f_role)
@@ -118,18 +137,41 @@ def load_config(path: str) -> PartyConfig:
     # --- runtime ---
     runtime_raw = raw.get("runtime", {})
     runtime = RuntimeConfig(
-        max_follower_lag_ms=int(
-            runtime_raw.get("max_follower_lag_ms", 200)
-        ),
+        max_follower_lag_ms=int(runtime_raw.get("max_follower_lag_ms", 200)),
         max_drift_ticks=int(runtime_raw.get("max_drift_ticks", 10)),
-        regroup_cooldown_ms=int(
-            runtime_raw.get("regroup_cooldown_ms", 3000)
-        ),
+        regroup_cooldown_ms=int(runtime_raw.get("regroup_cooldown_ms", 3000)),
         pause_on_resolution_mismatch=bool(
             runtime_raw.get("pause_on_resolution_mismatch", True)
         ),
     )
 
+    # --- nav (PoE2 offsets) ---
+    nav: Optional[Dict[str, Any]] = None
+    nav_raw = raw.get("nav")
+    if nav_raw:
+        aob_raw = nav_raw.get("aob", {})
+        aob: Dict[str, dict] = {}
+        for name in aob_raw:
+            aob[name] = _parse_aob_pattern(aob_raw[name])
+
+        behavior = nav_raw.get("behavior", {})
+        nav = {
+            "aob": aob,
+            "offsets": nav_raw.get("offsets", {}),
+            "world_to_grid_ratio": float(
+                nav_raw.get("world_to_grid_ratio", 10.8696)
+            ),
+            "render_component_name": nav_raw.get("render_component_name", "Render"),
+            "behavior": {
+                "formation": behavior.get("formation", {}),
+                "anti_stuck": behavior.get("anti_stuck", {}),
+            },
+        }
+
     return PartyConfig(
-        leader=leader, followers=followers, sampling=sampling, runtime=runtime
+        leader=leader,
+        followers=followers,
+        sampling=sampling,
+        runtime=runtime,
+        nav=nav,
     )

@@ -1,6 +1,82 @@
+# --- Party config (required by config_loader) ---
+leader:
+  role_id: leader_1
+
+followers:
+  - role_id: follower_1
+    window_title: "Path of Exile 2"
+  - role_id: follower_2
+    window_title: "Path of Exile 2"
+  - role_id: follower_3
+    window_title: "Path of Exile 2"
+  - role_id: follower_4
+    window_title: "Path of Exile 2"
+  - role_id: follower_5
+    window_title: "Path of Exile 2"
+
+sampling:
+  tick_ms: 50
+
+runtime:
+  max_follower_lag_ms: 200
+
+# --- PoE2 memory offsets (sourced from POE2Radar/Poe2Offsets.cs) ---
 nav:
+  # AOB pattern for locating the GameStates global pointer slot.
+  # Instruction: cmp [rip+rel32], rbp  (48 39 2D + 4-byte displacement)
+  # Followed by jnz (0F 85 ...) for uniqueness.
+  # resolution: GameStates = *(match_addr + instr_len + int32(displacement))
+  aob:
+    game_states:
+      bytes: "48 39 2D ?? ?? ?? ?? 0F 85 16 01 00 00"
+      disp_offset: 3        # displacement starts at byte 3 of the match
+      instr_len: 7          # cmp [rip+rel32], rbp = 7 bytes
+
+  # Full offset chain: GameStates → InGameState → AreaInstance → Entity → Render → XYZ
   offsets:
-    local_player_chain:
-      - 0x00000000
-      - 0x00000000
-      - 0x00000000
+    game_state:
+      current_state_ptr: 0x08     # StdVector<IntPtr> — first element → InGameState
+    in_game_state:
+      area_instance: 0x290        # → AreaInstance
+    area_instance:
+      local_player: 0x5B8         # → player Entity
+    entity:
+      details: 0x08               # → EntityDetails
+      component_list: 0x10        # StdVector<IntPtr> — indexed by ComponentLookUp
+    entity_details:
+      component_lookup: 0x28      # → ComponentLookUp
+    component_lookup:
+      name_bucket: 0x28           # StdBucket; Data StdVector of {NamePtr, Index} pairs
+      entry_stride: 0x10          # {IntPtr NamePtr (0x00); int Index (0x08); int pad (0x0C)}
+    render_component:
+      world_position: 0x138       # Vector3 (float X, float Y, float Z)
+    positioned_component:
+      reaction: 0x1E0             # byte; & 0x7F == 1 → friendly
+    life_component:
+      health: 0x1B0               # VitalStruct (+0x2C=Max, +0x30=Current)
+      mana: 0x208
+      energy_shield: 0x248
+
+  # Tile→world = 250, tile→grid = 23 → ratio ≈ 10.8696
+  world_to_grid_ratio: 10.8696
+
+  # Render component name — utf-16 string to match in ComponentLookUp
+  render_component_name: "Render"
+
+  # --- Navigation behaviour ---
+  behavior:
+    # Formation following: each follower targets a different position
+    # relative to the leader (per-follower index).
+    formation:
+      type: diamond          # diamond | line | v
+      spacing: 35.0          # world units between formation positions
+
+    # Anti-stuck: escalating strategies when a follower stops moving
+    anti_stuck:
+      enabled: true
+      distance_threshold: 2.0   # world units — moved less = "stuck"
+      stuck_ticks: 10           # consecutive stalled ticks before action
+      jump_key: "SPACE"         # key name for InputInjector (jump)
+      skill_key: "Q"            # movement skill hotkey (flame dash etc.)
+      reverse_duration_ticks: 8 # how long to reverse away from leader
+      reverse_cooldown_ticks: 30

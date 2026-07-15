@@ -1,22 +1,23 @@
 from __future__ import annotations
 
+import queue
+import logging
 from pathlib import Path
+from typing import Optional
 
 from src.common.config_loader import load_config
-from src.common.logger import get_logger, setup_logging
+from src.common.gui_log_handler import GuiLogHandler
+from src.common.logger import ROOT_LOGGER_NAME, get_logger
 from src.core.window_registry import WindowRegistry
 from src.follow.nav_agent import NavAgent
+from src.ui.gui import NavGui
 
 logger = get_logger(__name__)
 
 
 def main() -> None:
-    setup_logging()
-
     project_root = Path(__file__).resolve().parent.parent
-    default_config = project_root / "config" / "nav-follow.yaml"
-    config_path = default_config
-
+    config_path = project_root / "config" / "nav-follow.yaml"
     config = load_config(str(config_path))
 
     registry = WindowRegistry()
@@ -31,20 +32,54 @@ def main() -> None:
     leader_hwnd = all_windows[0]
     follower_hwnds = all_windows[1:]
 
+    log_handler = GuiLogHandler(level=logging.DEBUG)
+    log_handler.setFormatter(
+        logging.Formatter(
+            "[%(asctime)s] [%(levelname)7s] %(message)s", datefmt="%H:%M:%S"
+        )
+    )
+    root = logging.getLogger(ROOT_LOGGER_NAME)
+    root.addHandler(log_handler)
+    root.setLevel(logging.DEBUG)
+
     logger.info(
-        "Nav mode: leader HWND=%d, %d follower(s): %s.",
+        "Leader HWND=%d, %d follower(s): %s.",
         leader_hwnd,
         len(follower_hwnds),
         follower_hwnds,
     )
 
-    offset_config = config.nav.offsets if hasattr(config, "nav") else {}
-    agent = NavAgent(
-        offset_config=offset_config,
+    status_queue: queue.Queue[dict] = queue.Queue(maxsize=500)
+    agent_ref: list[Optional[NavAgent]] = [None]
+
+    def on_start() -> None:
+        nav_config = config.nav if hasattr(config, "nav") else None
+        agent = NavAgent(
+            nav_config=nav_config,
+            leader_hwnd=leader_hwnd,
+            follower_hwnds=follower_hwnds,
+            status_queue=status_queue,
+        )
+        agent_ref[0] = agent
+        agent.start()
+
+    def on_stop() -> None:
+        agent = agent_ref[0]
+        if agent is not None:
+            agent.stop()
+            agent_ref[0] = None
+
+    gui = NavGui(
+        status_queue=status_queue,
+        log_handler=log_handler,
         leader_hwnd=leader_hwnd,
+        leader_pid=0,
         follower_hwnds=follower_hwnds,
+        follower_pids={},
+        on_start=on_start,
+        on_stop=on_stop,
     )
-    agent.start()
+    gui.mainloop()
 
 
 if __name__ == "__main__":
