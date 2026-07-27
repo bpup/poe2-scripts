@@ -5,27 +5,30 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.common.config_loader import AccountConfig, PartyConfig
 from src.common.gui_log_handler import GuiLogHandler, LogPanel
 from src.common.logger import get_logger
-from src.core.memory_reader import EntityPosition, HealthData
+from src.core.memory_reader import CharacterInfo, EntityPosition, HealthData
+from src.ui.map_view import MapView
 
 logger = get_logger(__name__)
 
 
-# ── Window Selector Dialog ──────────────────────────────────────
-
 _WindowEntry = Dict[str, Any]
 
 
-def select_windows(windows: List[_WindowEntry]) -> Optional[Tuple[int, List[int]]]:
-    """Show a modal dialog to pick the Leader window and confirm Followers.
+def select_windows(
+    windows: List[_WindowEntry],
+    accounts: List[AccountConfig],
+) -> Optional[Dict[str, int]]:
+    """Show an account→HWND mapping dialog.
 
-    Returns ``(leader_hwnd, follower_hwnds)`` or ``None`` if cancelled.
+    Returns ``{account_id: hwnd}`` or ``None`` if cancelled.
     """
     root = tk.Tk()
     root.withdraw()
 
-    dialog = _WindowSelectorDialog(root, windows)
+    dialog = _WindowSelectorDialog(root, windows, accounts)
     root.wait_window(dialog)
 
     try:
@@ -37,21 +40,38 @@ def select_windows(windows: List[_WindowEntry]) -> Optional[Tuple[int, List[int]
 
 
 class _WindowSelectorDialog(tk.Toplevel):
-    def __init__(self, parent: tk.Tk, windows: List[_WindowEntry]) -> None:
+    def __init__(
+        self, parent: tk.Tk, windows: List[_WindowEntry],
+        accounts: List[AccountConfig],
+    ) -> None:
         super().__init__(parent)
-        self.title("Select PoE2 Windows")
+        self.title("Map Accounts to PoE2 Windows")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         self._windows = windows
-        self._leader_var = tk.StringVar()
-        self._follower_vars: Dict[str, tk.BooleanVar] = {}
-        self.result: Optional[Tuple[int, List[int]]] = None
+        self._accounts = accounts
+
+        hwnd_options = [self._option_label(w) for w in windows]
+        self._hwnd_options = hwnd_options
+        self._hwnd_values = [int(w["handle"]) for w in windows]
+        self._selection_vars: List[tk.StringVar] = []
+
+        self.result: Optional[Dict[str, int]] = None
 
         self._build_ui()
         self.grab_set()
 
-    # ── UI ─────────────────────────────────────────────────
+    @staticmethod
+    def _option_label(win: _WindowEntry) -> str:
+        cn = win.get("char_name", "")
+        hwnd = win.get("handle", "")
+        if cn and cn != "???":
+            cl = win.get("char_class", "")
+            lv = win.get("char_level", "")
+            extra = f" {cl} L{lv}" if cl or lv else ""
+            return f"{cn}{extra} (HWND={hwnd})"
+        return f"HWND={hwnd} (PID={win.get('pid', '?')})"
 
     def _build_ui(self) -> None:
         frame = ttk.Frame(self, padding=12)
@@ -59,90 +79,93 @@ class _WindowSelectorDialog(tk.Toplevel):
 
         ttk.Label(
             frame,
-            text=f"Found {len(self._windows)} PoE2 window(s). Select one Leader, "
-                 "then choose Followers:",
-            wraplength=420,
+            text=f"Found {len(self._windows)} PoE2 window(s) — "
+                 f"map to {len(self._accounts)} account(s):",
+            wraplength=520,
         ).grid(row=0, column=0, columnspan=5, sticky=tk.W, pady=(0, 8))
 
-        # header row
-        ttk.Label(frame, text="Leader", font=("", 9, "bold")).grid(
-            row=1, column=0, padx=4
+        ttk.Label(frame, text="Account", font=("", 9, "bold")).grid(
+            row=1, column=0, padx=4, sticky=tk.W,
         )
-        ttk.Label(frame, text="Follow", font=("", 9, "bold")).grid(
-            row=1, column=1, padx=4
+        ttk.Label(frame, text="Window", font=("", 9, "bold")).grid(
+            row=1, column=1, padx=4, sticky=tk.W,
         )
-        ttk.Label(frame, text="HWND", font=("", 9, "bold")).grid(
-            row=1, column=2, padx=4, sticky=tk.W
+        ttk.Label(frame, text="P1 (Slot 0)", font=("", 9, "bold")).grid(
+            row=1, column=2, padx=4, sticky=tk.W,
         )
-        ttk.Label(frame, text="Window Title", font=("", 9, "bold")).grid(
-            row=1, column=3, padx=4, sticky=tk.W
+        ttk.Label(frame, text="P2 (Slot 1)", font=("", 9, "bold")).grid(
+            row=1, column=3, padx=4, sticky=tk.W,
+        )
+        ttk.Label(frame, text="Role", font=("", 9, "bold")).grid(
+            row=1, column=4, padx=4, sticky=tk.W,
         )
 
         sep = ttk.Separator(frame, orient=tk.HORIZONTAL)
         sep.grid(row=2, column=0, columnspan=5, sticky=tk.EW, pady=2)
 
-        for i, win in enumerate(self._windows):
-            hwnd_str = win["handle"]
-            title = win.get("title", "")
+        for i, account in enumerate(self._accounts):
             row = i + 3
-
-            # leader radio — first window pre-selected
-            rb = ttk.Radiobutton(
-                frame, variable=self._leader_var, value=hwnd_str,
+            ttk.Label(frame, text=account.id, font=("", 9, "bold")).grid(
+                row=row, column=0, padx=4, sticky=tk.W,
             )
-            if i == 0:
-                rb.invoke()
-            rb.grid(row=row, column=0, padx=4)
 
-            # follower checkbox — all checked by default
-            var = tk.BooleanVar(value=True)
-            self._follower_vars[hwnd_str] = var
-            cb = ttk.Checkbutton(frame, variable=var)
-            cb.grid(row=row, column=1, padx=4)
+            var = tk.StringVar(value=self._hwnd_options[0] if self._hwnd_options else "")
+            self._selection_vars.append(var)
+            cb = ttk.Combobox(
+                frame, textvariable=var, values=self._hwnd_options,
+                state="readonly", width=40,
+            )
+            cb.grid(row=row, column=1, padx=4, sticky=tk.W)
 
-            ttk.Label(frame, text=hwnd_str).grid(row=row, column=2, padx=4, sticky=tk.W)
-            ttk.Label(frame, text=title[:60]).grid(row=row, column=3, padx=4, sticky=tk.W)
+            p1_label = "—"
+            p2_label = "gamepad"
+            roles: List[str] = []
+            for char in account.characters:
+                if char.slot == 0:
+                    roles.append(f"P1={char.role}")
+                elif char.slot == 1:
+                    roles.append(f"P2={char.role}")
 
-        # ── buttons ──────────────────────────────────────
+            ttk.Label(frame, text=p1_label).grid(row=row, column=2, padx=4, sticky=tk.W)
+            ttk.Label(frame, text=p2_label).grid(row=row, column=3, padx=4, sticky=tk.W)
+            ttk.Label(frame, text=", ".join(roles) if roles else "—").grid(
+                row=row, column=4, padx=4, sticky=tk.W,
+            )
+
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=len(self._windows) + 3, column=0, columnspan=5,
+        btn_frame.grid(row=len(self._accounts) + 3, column=0, columnspan=5,
                        pady=(12, 0), sticky=tk.E)
 
         ttk.Button(btn_frame, text="OK", command=self._on_confirm).pack(
-            side=tk.LEFT, padx=4
+            side=tk.LEFT, padx=4,
         )
         ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(
-            side=tk.LEFT, padx=4
+            side=tk.LEFT, padx=4,
         )
 
-    # ── callbacks ─────────────────────────────────────────
-
     def _on_confirm(self) -> None:
-        leader_str = self._leader_var.get()
-        if not leader_str:
+        result: Dict[str, int] = {}
+        for i, account in enumerate(self._accounts):
+            selected = self._selection_vars[i].get()
+            if not selected:
+                messagebox.showwarning(
+                    "Missing Window",
+                    f"No window selected for account '{account.id}'.",
+                    parent=self,
+                )
+                return
+            idx = self._hwnd_options.index(selected)
+            result[account.id] = self._hwnd_values[idx]
+
+        if len(set(result.values())) != len(result):
             messagebox.showwarning(
-                "No Leader", "Please select one Leader window.", parent=self,
+                "Duplicate Window",
+                "Each account must use a different window.",
+                parent=self,
             )
             return
 
-        leader_hwnd = int(leader_str)
-
-        follower_hwnds: List[int] = []
-        for win in self._windows:
-            hwnd_str = win["handle"]
-            hwnd_int = int(hwnd_str)
-            if hwnd_int == leader_hwnd:
-                continue
-            if self._follower_vars.get(hwnd_str, tk.BooleanVar(value=False)).get():
-                follower_hwnds.append(hwnd_int)
-
-        if not follower_hwnds:
-            messagebox.showwarning(
-                "No Followers", "Please select at least one Follower.", parent=self,
-            )
-            return
-
-        self.result = (leader_hwnd, follower_hwnds)
+        self.result = result
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -152,24 +175,29 @@ class _WindowSelectorDialog(tk.Toplevel):
 
 class FollowerTracker:
     __slots__ = (
-        "hwnd",
-        "pid",
-        "index",
-        "pos",
-        "formation_target",
-        "stuck_level",
-        "stuck_counter",
-        "reverse_remaining",
-        "wasd",
-        "health",
+        "key", "account_id", "slot", "role", "input_method",
+        "hwnd", "pid", "index", "char_name", "char_class", "char_level",
+        "pos", "formation_target", "stuck_level", "stuck_counter",
+        "reverse_remaining", "wasd", "health",
     )
 
-    def __init__(self, hwnd: int, pid: int, index: int) -> None:
+    def __init__(
+        self, key: str, account_id: str, slot: int, role: str,
+        input_method: str, hwnd: int, pid: int, index: int,
+    ) -> None:
+        self.key = key
+        self.account_id = account_id
+        self.slot = slot
+        self.role = role
+        self.input_method = input_method
         self.hwnd = hwnd
         self.pid = pid
         self.index = index
+        self.char_name: str = ""
+        self.char_class: str = ""
+        self.char_level: int = 0
         self.pos: Optional[EntityPosition] = None
-        self.formation_target: Optional[tuple[float, float]] = None
+        self.formation_target: Optional[Tuple[float, float]] = None
         self.stuck_level = 0
         self.stuck_counter = 0
         self.reverse_remaining = 0
@@ -184,23 +212,48 @@ class NavGui:
         self,
         status_queue: queue.Queue[dict],
         log_handler: GuiLogHandler,
-        leader_hwnd: int,
-        leader_pid: int,
-        follower_hwnds: List[int],
-        follower_pids: Dict[int, int],
+        party_config: PartyConfig,
+        account_hwnds: Dict[str, int],
+        window_info: Dict[str, dict],
         on_start: Any,
         on_stop: Any,
         on_pause_toggle: Any = None,
     ) -> None:
         self._status_queue = status_queue
         self._log_handler = log_handler
-        self._leader_hwnd = leader_hwnd
-        self._leader_pid = leader_pid
+        self._party_config = party_config
+        self._account_hwnds = account_hwnds
+        self._window_info = window_info
 
-        self._followers: Dict[int, FollowerTracker] = {}
-        for i, hwnd in enumerate(follower_hwnds):
-            pid = follower_pids.get(hwnd, 0)
-            self._followers[hwnd] = FollowerTracker(hwnd, pid, i)
+        self._leader_key: Optional[str] = None
+        self._leader_char: Optional[CharacterInfo] = None
+        self._followers: Dict[str, FollowerTracker] = {}
+
+        follower_idx = 0
+        for account in party_config.accounts:
+            p1_info = window_info.get(account.id, {})
+            p1_name = p1_info.get("char_name", "")
+            p1_class = p1_info.get("char_class", "")
+            p1_level = p1_info.get("char_level", 0)
+            for char in account.characters:
+                key = f"{account.id}:{char.slot}"
+                hwnd = account_hwnds.get(account.id, 0)
+                pid = p1_info.get("pid", 0) if isinstance(p1_info, dict) else 0
+                tracker = FollowerTracker(
+                    key=key, account_id=account.id, slot=char.slot,
+                    role=char.role, input_method=char.input_method,
+                    hwnd=hwnd, pid=pid, index=follower_idx,
+                )
+                if char.slot == 0:
+                    tracker.char_name = p1_name
+                    tracker.char_class = p1_class
+                    tracker.char_level = p1_level
+                self._followers[key] = tracker
+                follower_idx += 1
+
+        for ft in self._followers.values():
+            if ft.role == "leader":
+                self._leader_key = ft.key
 
         self._on_start = on_start
         self._on_stop = on_stop
@@ -208,75 +261,124 @@ class NavGui:
         self._running = False
 
         # Per-follower pause state (source of truth for GUI display)
-        self._pause_states: Dict[int, bool] = {hwnd: False for hwnd in follower_hwnds}
+        self._pause_states: Dict[str, bool] = {key: False for key in self._followers}
 
         self._root = tk.Tk()
         self._root.title("PoE2 Auto-Follow")
-        self._root.geometry("900x650")
-        self._root.minsize(640, 400)
+        self._root.geometry("1100x750")
+        self._root.minsize(800, 500)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._build_leader_frame()
-        self._build_follower_table()
+        self._build_notebook()
         self._build_button_bar()
         self._build_log_panel()
 
         self._root.after(self.POLL_MS, self._poll_status)
 
-    def _build_leader_frame(self) -> None:
-        frame = ttk.LabelFrame(self._root, text="Leader", padding=4)
+    def _build_notebook(self) -> None:
+        nb = ttk.Notebook(self._root)
+        nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 0))
+
+        overview = ttk.Frame(nb)
+        nb.add(overview, text="Overview")
+
+        self._build_leader_frame(overview)
+        self._build_follower_table(overview)
+
+        map_frame = ttk.Frame(nb)
+        nb.add(map_frame, text="Big Map")
+        self._map_view = MapView(map_frame)
+        self._map_view.pack(fill=tk.BOTH, expand=True)
+
+    def _build_leader_frame(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="Leader", padding=4)
         frame.pack(fill=tk.X, padx=4, pady=(4, 2))
 
-        self._leader_label = ttk.Label(
-            frame,
-            text=f"HWND={self._leader_hwnd}  PID={self._leader_pid}  Pos: --",
-            font=("Consolas", 10),
-        )
+        info = self._leader_info_text()
+        self._leader_label = ttk.Label(frame, text=info, font=("Consolas", 10))
         self._leader_label.pack(anchor=tk.W, padx=2)
 
-    def _build_follower_table(self) -> None:
-        frame = ttk.LabelFrame(self._root, text="Followers", padding=4)
+    def _leader_info_text(self) -> str:
+        if self._leader_key is None:
+            return "Leader: —"
+
+        ft = self._followers.get(self._leader_key)
+        if ft is None:
+            return f"Leader: {self._leader_key}"
+
+        name_part = ""
+        if ft.char_name:
+            cl = f" ({ft.char_class})" if ft.char_class else ""
+            name_part = f"  [{ft.account_id}] {ft.char_name}{cl} L{ft.char_level}"
+
+        return (
+            f"Leader: {ft.key}{name_part}  "
+            f"HWND={ft.hwnd}  PID={ft.pid}  Pos: --"
+        )
+
+    def _build_follower_table(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="Followers", padding=4)
         frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
 
-        columns = ("idx", "hwnd", "pid", "pos", "fmt_target", "stuck", "wasd", "health", "pause")
+        columns = ("idx", "account", "slot", "role", "name", "pos",
+                   "fmt_target", "stuck", "input", "wasd", "health", "pause")
         self._tree = ttk.Treeview(
-            frame, columns=columns, show="headings", height=6
+            frame, columns=columns, show="headings", height=8,
         )
         self._tree.heading("idx", text="#", anchor=tk.CENTER)
-        self._tree.heading("hwnd", text="HWND", anchor=tk.CENTER)
-        self._tree.heading("pid", text="PID", anchor=tk.CENTER)
+        self._tree.heading("account", text="Account", anchor=tk.W)
+        self._tree.heading("slot", text="Slot", anchor=tk.CENTER)
+        self._tree.heading("role", text="Role", anchor=tk.CENTER)
+        self._tree.heading("name", text="Character", anchor=tk.W)
         self._tree.heading("pos", text="Position (X, Y)", anchor=tk.W)
         self._tree.heading("fmt_target", text="Formation Target", anchor=tk.W)
-        self._tree.heading("stuck", text="Stuck Lvl/Cnt/Rev", anchor=tk.CENTER)
+        self._tree.heading("stuck", text="Stuck", anchor=tk.CENTER)
+        self._tree.heading("input", text="Input", anchor=tk.CENTER)
         self._tree.heading("wasd", text="Keys", anchor=tk.CENTER)
         self._tree.heading("health", text="HP / ES", anchor=tk.CENTER)
         self._tree.heading("pause", text="Pause", anchor=tk.CENTER)
 
-        self._tree.column("idx", width=30, anchor=tk.CENTER)
-        self._tree.column("hwnd", width=60, anchor=tk.CENTER)
-        self._tree.column("pid", width=55, anchor=tk.CENTER)
-        self._tree.column("pos", width=140, anchor=tk.W)
-        self._tree.column("fmt_target", width=140, anchor=tk.W)
-        self._tree.column("stuck", width=90, anchor=tk.CENTER)
-        self._tree.column("wasd", width=60, anchor=tk.CENTER)
-        self._tree.column("health", width=110, anchor=tk.CENTER)
-        self._tree.column("pause", width=50, anchor=tk.CENTER)
+        widths = {
+            "idx": 30, "account": 60, "slot": 36, "role": 48,
+            "name": 160, "pos": 140, "fmt_target": 140,
+            "stuck": 90, "input": 52, "wasd": 60, "health": 88,
+            "pause": 50,
+        }
+        for col, w in widths.items():
+            an = tk.CENTER if col in ("idx", "slot", "role", "stuck", "input", "wasd", "health", "pause") else tk.W
+            self._tree.column(col, width=w, anchor=an)
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self._tree.yview)
         self._tree.configure(yscrollcommand=scrollbar.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        for f in self._followers.values():
+        for ft in self._followers.values():
+            if ft.role == "leader":
+                continue
+            nm = self._fmt_char_name(ft)
+            inp = ft.input_method[:4] if ft.input_method else "keyb"
             self._tree.insert(
                 "",
                 tk.END,
-                iid=str(f.hwnd),
-                values=(f.index, f.hwnd, f.pid or "--", "--", "--", "--", "", "--", "▶"),
+                iid=ft.key,
+                values=(
+                    ft.index, ft.account_id, ft.slot, ft.role,
+                    nm, "--", "--", "--", inp, "--", "--", "▶",
+                ),
             )
 
         # Click on the Pause column toggles per-follower pause
         self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
+
+    @staticmethod
+    def _fmt_char_name(tracker: FollowerTracker) -> str:
+        if tracker.char_name:
+            cl = f" ({tracker.char_class})" if tracker.char_class else ""
+            return f"{tracker.char_name}{cl} L{tracker.char_level}"
+        if tracker.input_method == "gamepad":
+            return "(gamepad)"
+        return f"HWND={tracker.hwnd}"
 
     def _build_button_bar(self) -> None:
         frame = ttk.Frame(self._root)
@@ -286,7 +388,7 @@ class NavGui:
         self._start_btn.pack(side=tk.LEFT, padx=2)
 
         self._stop_btn = ttk.Button(
-            frame, text="Stop", command=self._do_stop, state=tk.DISABLED
+            frame, text="Stop", command=self._do_stop, state=tk.DISABLED,
         )
         self._stop_btn.pack(side=tk.LEFT, padx=2)
 
@@ -295,38 +397,35 @@ class NavGui:
 
     def _build_log_panel(self) -> None:
         frame = ttk.LabelFrame(self._root, text="Log", padding=2)
-        frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(2, 4))
+        frame.pack(fill=tk.BOTH, expand=False, padx=4, pady=(2, 4))
         self._log_panel = LogPanel(frame, self._log_handler, poll_ms=100, max_lines=500)
         self._log_panel.pack(fill=tk.BOTH, expand=True)
 
     def reset_pause_states(self) -> None:
         """Clear all per-follower pause states (called when the agent restarts)."""
-        for hwnd in list(self._pause_states):
-            self._pause_states[hwnd] = False
-        for hwnd_str in self._tree.get_children():
-            vals = list(self._tree.item(hwnd_str, "values"))
-            if len(vals) >= 9:
-                vals[8] = "▶"
-                self._tree.item(hwnd_str, values=vals)
+        for key in list(self._pause_states):
+            self._pause_states[key] = False
+        for tree_id in self._tree.get_children():
+            vals = list(self._tree.item(tree_id, "values"))
+            if len(vals) >= 12:
+                vals[11] = "▶"
+                self._tree.item(tree_id, values=vals)
 
     def _on_tree_click(self, event: Any) -> None:
-        """Toggle pause state when the Pause column (#9) is clicked."""
+        """Toggle pause state when the Pause column (#12) is clicked."""
         col = self._tree.identify_column(event.x)
         row = self._tree.identify_row(event.y)
-        if not row or col != "#9":
+        if not row or col != "#12":
             return
-        try:
-            hwnd = int(row)
-        except ValueError:
-            return
-        paused = not self._pause_states.get(hwnd, False)
-        self._pause_states[hwnd] = paused
+        key = row
+        paused = not self._pause_states.get(key, False)
+        self._pause_states[key] = paused
         vals = list(self._tree.item(row, "values"))
-        if len(vals) >= 9:
-            vals[8] = "⏸" if paused else "▶"
+        if len(vals) >= 12:
+            vals[11] = "⏸" if paused else "▶"
             self._tree.item(row, values=vals)
         if self._on_pause_toggle:
-            self._on_pause_toggle(hwnd, paused)
+            self._on_pause_toggle(key, paused)
 
     def _do_start(self) -> None:
         self.reset_pause_states()
@@ -365,12 +464,25 @@ class NavGui:
                 self._update_followers(msg.get("data", []))
             elif msg_type == "state":
                 self._status_label.configure(text=msg.get("text", ""))
+            elif msg_type == "map":
+                self._update_map(msg.get("data", {}))
 
         self._root.after(self.POLL_MS, self._poll_status)
 
     def _update_leader(self, msg: dict) -> None:
         pos = msg.get("pos")
         health = msg.get("health")
+        ci = msg.get("char_info")
+        if ci is not None:
+            self._leader_char = ci
+
+        ft = self._followers.get(self._leader_key or "")
+        if ft:
+            if ci:
+                ft.char_name = ci.name
+                ft.char_class = ci.class_name
+                ft.char_level = ci.level
+
         hp_str = ""
         if isinstance(health, HealthData):
             hp_str = f"  HP: {health.current}/{health.maximum} ({health.ratio:.0%})"
@@ -378,30 +490,22 @@ class NavGui:
                 hp_str += f"  ES: {health.es_current}/{health.es_maximum}"
         elif isinstance(health, dict):
             hp_str = f"  HP: {health.get('current','?')}/{health.get('maximum','?')}"
-        if pos:
-            self._leader_label.configure(
-                text=f"HWND={self._leader_hwnd}  PID={self._leader_pid}  "
-                f"Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}){hp_str}"
-            )
-        else:
-            self._leader_label.configure(
-                text=f"HWND={self._leader_hwnd}  PID={self._leader_pid}  Pos: --"
-            )
 
-    def _update_followers(self, data: list[dict]) -> None:
+        info = self._leader_info_text()
+        if pos:
+            info += f"  Pos: ({pos.x:.1f}, {pos.y:.1f}, {pos.z:.1f}){hp_str}"
+        self._leader_label.configure(text=info)
+
+    def _update_followers(self, data: List[dict]) -> None:
         for item in data:
-            hwnd = item.get("hwnd")
-            if hwnd is None or str(hwnd) not in self._tree.get_children():
+            key = item.get("key", "")
+            if not key or key not in self._tree.get_children():
                 continue
 
             pos = item.get("pos")
             fmt = item.get("fmt_target")
-            pos_str = (
-                f"({pos.x:.1f}, {pos.y:.1f})" if pos else "--"
-            )
-            fmt_str = (
-                f"({fmt[0]:.1f}, {fmt[1]:.1f})" if fmt else "--"
-            )
+            pos_str = f"({pos.x:.1f}, {pos.y:.1f})" if pos else "--"
+            fmt_str = f"({fmt[0]:.1f}, {fmt[1]:.1f})" if fmt else "--"
             stuck_str = (
                 f"L{item.get('stuck_level',0)} "
                 f"C{item.get('stuck_counter',0)} "
@@ -420,21 +524,43 @@ class NavGui:
             else:
                 hp_str = "--"
 
-            pause_str = "⏸" if self._pause_states.get(hwnd, False) else "▶"
+            char_info = item.get("char_info")
+            tracker = self._followers.get(key)
+            if char_info and tracker:
+                tracker.char_name = char_info.name
+                tracker.char_class = char_info.class_name
+                tracker.char_level = char_info.level
 
-            tk_id = str(hwnd)
-            if tk_id in self._tree.get_children():
-                self._tree.item(tk_id, values=(
+            name_str = self._fmt_char_name(tracker) if tracker else key
+            inp_str = tracker.input_method[:4] if tracker and tracker.input_method else "keyb"
+
+            pause_str = "⏸" if self._pause_states.get(key, False) else "▶"
+
+            if key in self._tree.get_children():
+                self._tree.item(key, values=(
                     item.get("index", "?"),
-                    hwnd,
-                    item.get("pid", "--"),
+                    tracker.account_id if tracker else "?",
+                    tracker.slot if tracker else "?",
+                    tracker.role if tracker else "?",
+                    name_str,
                     pos_str,
                     fmt_str,
                     stuck_str,
+                    inp_str,
                     wasd_str,
                     hp_str,
                     pause_str,
                 ))
+
+    def _update_map(self, data: dict) -> None:
+        terrain = data.get("terrain")
+        leader_pos = data.get("leader_pos")
+        follower_list = data.get("followers", [])
+        self._map_view.update_data(
+            terrain=terrain,
+            leader_pos=leader_pos,
+            follower_positions=follower_list,
+        )
 
     def mainloop(self) -> None:
         self._root.mainloop()

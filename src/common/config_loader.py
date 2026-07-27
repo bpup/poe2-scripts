@@ -1,5 +1,3 @@
-"""Configuration loader for PoE2 multi-client auto-follow."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -10,32 +8,39 @@ import yaml
 
 
 @dataclass
-class LeaderConfig:
-    """Leader (main) role configuration."""
+class CharacterConfig:
+    """A single character within an account window.
 
-    role_id: str
+    slot: 0 = P1 (keyboard), 1 = P2 (gamepad)
+    role: "leader" (manual control, no injection) or "follower"
+    input_method: auto-inferred from slot if empty ("keyboard" | "gamepad")
+    """
+    slot: int
+    role: str
+    input_method: str = ""
 
 
 @dataclass
-class FollowerConfig:
-    """Follower role configuration."""
+class AccountConfig:
+    """One PoE2 window with 1-2 characters in local co-op.
 
-    role_id: str
+    id: unique account identifier ("main", "alt", ...)
+    window_title: substring to match for HWND detection
+    characters: 1-2 CharacterConfig entries (slot 0 required)
+    """
+    id: str
     window_title: str
+    characters: List[CharacterConfig] = field(default_factory=list)
 
 
 @dataclass
 class SamplingConfig:
-    """Input sampling parameters."""
-
     tick_ms: int = 50
     turn_threshold: float = 15.0
 
 
 @dataclass
 class RuntimeConfig:
-    """Runtime behaviour parameters."""
-
     max_follower_lag_ms: int = 200
     max_drift_ticks: int = 10
     regroup_cooldown_ms: int = 3000
@@ -44,10 +49,7 @@ class RuntimeConfig:
 
 @dataclass
 class PartyConfig:
-    """Complete party configuration for a follow session."""
-
-    leader: LeaderConfig
-    followers: List[FollowerConfig] = field(default_factory=list)
+    accounts: List[AccountConfig] = field(default_factory=list)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     nav: Optional[Dict[str, Any]] = None
@@ -56,7 +58,7 @@ class PartyConfig:
 def _parse_aob_pattern(raw: dict) -> dict:
     hex_str: str = raw.get("bytes", "")
     parts = hex_str.strip().split()
-    pattern: List[int] = []  # -1 = wildcard
+    pattern: List[int] = []
     mask: List[int] = []
     for p in parts:
         if p in ("?", "??"):
@@ -73,19 +75,15 @@ def _parse_aob_pattern(raw: dict) -> dict:
     }
 
 
+def _default_input_method(slot: int, role: str) -> str:
+    if role == "leader":
+        return "none"
+    if slot == 0:
+        return "keyboard"
+    return "gamepad"
+
+
 def load_config(path: str) -> PartyConfig:
-    """Load and validate party configuration from a YAML file.
-
-    Args:
-        path: Filesystem path to the YAML configuration file.
-
-    Returns:
-        A validated PartyConfig instance.
-
-    Raises:
-        FileNotFoundError: If the config file does not exist.
-        ValueError: If required fields are missing or invalid.
-    """
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -96,36 +94,73 @@ def load_config(path: str) -> PartyConfig:
     if not raw:
         raise ValueError("Config file is empty.")
 
-    # --- leader ---
-    leader_raw = raw.get("leader")
-    if not leader_raw:
-        raise ValueError("Missing 'leader' section in config.")
-    role_id = leader_raw.get("role_id")
-    if not role_id or not isinstance(role_id, str):
-        raise ValueError("leader.role_id must be a non-empty string.")
-    leader = LeaderConfig(role_id=role_id)
+    # ── accounts ──
+    accounts_raw = raw.get("accounts", [])
+    if not isinstance(accounts_raw, list):
+        raise ValueError("'accounts' must be a list.")
+    if not accounts_raw:
+        raise ValueError("At least one account is required.")
 
-    # --- followers ---
-    followers_raw = raw.get("followers", [])
-    if not isinstance(followers_raw, list):
-        raise ValueError("'followers' must be a list.")
-    if len(followers_raw) < 1 or len(followers_raw) > 5:
-        raise ValueError(f"Expected 1-5 followers, got {len(followers_raw)}.")
+    seen_acct_ids: set = set()
+    accounts: list[AccountConfig] = []
+    for a_raw in accounts_raw:
+        a_id = a_raw.get("id")
+        if not a_id or not isinstance(a_id, str):
+            raise ValueError("Each account must have a non-empty 'id'.")
+        if a_id in seen_acct_ids:
+            raise ValueError(f"Duplicate account id: {a_id}")
+        seen_acct_ids.add(a_id)
 
-    seen_ids: set = set()
-    followers: list[FollowerConfig] = []
-    for i, f_raw in enumerate(followers_raw):
-        f_role = f_raw.get("role_id")
-        if not f_role or not isinstance(f_role, str):
-            raise ValueError(f"follower[{i}].role_id must be a non-empty string.")
-        if f_role in seen_ids:
-            raise ValueError(f"Duplicate follower role_id: {f_role}")
-        seen_ids.add(f_role)
+        window_title = a_raw.get("window_title", "Path of Exile 2")
 
-        f_title = f_raw.get("window_title", "Path of Exile 2")
-        followers.append(FollowerConfig(role_id=f_role, window_title=f_title))
+        chars_raw = a_raw.get("characters", [])
+        if not isinstance(chars_raw, list):
+            raise ValueError(f"account.{a_id}.characters must be a list.")
+        if len(chars_raw) < 1:
+            raise ValueError(f"account.{a_id} must have at least 1 character.")
+        if len(chars_raw) > 2:
+            raise ValueError(f"account.{a_id} has {len(chars_raw)} characters — max 2 for local co-op.")
 
-    # --- sampling ---
+        seen_slots: set = set()
+        characters: list[CharacterConfig] = []
+        for c_raw in chars_raw:
+            slot = c_raw.get("slot")
+            if slot not in (0, 1):
+                raise ValueError(f"account.{a_id} character slot must be 0 or 1, got {slot}.")
+            if slot in seen_slots:
+                raise ValueError(f"account.{a_id} duplicate character slot {slot}.")
+            seen_slots.add(slot)
+
+            role = c_raw.get("role")
+            if role not in ("leader", "follower"):
+                raise ValueError(
+                    f"account.{a_id} slot {slot} role must be 'leader' or 'follower', got {role!r}."
+                )
+
+            input_method = c_raw.get("input_method", "")
+            if input_method not in ("", "keyboard", "gamepad", "none"):
+                raise ValueError(
+                    f"account.{a_id} slot {slot} invalid input_method {input_method!r}."
+                    f" Must be keyboard, gamepad, none, or omit for auto."
+                )
+            if not input_method:
+                input_method = _default_input_method(slot, role)
+
+            characters.append(CharacterConfig(slot=slot, role=role, input_method=input_method))
+
+        accounts.append(AccountConfig(id=a_id, window_title=window_title, characters=characters))
+
+    # ── leader validation ──
+    leader_slots = [
+        (acct.id, ch.slot) for acct in accounts for ch in acct.characters if ch.role == "leader"
+    ]
+    if not leader_slots:
+        raise ValueError("No leader assigned — exactly one character must have role 'leader'.")
+    if len(leader_slots) > 1:
+        ids = ", ".join(f"{aid}:{slot}" for aid, slot in leader_slots)
+        raise ValueError(f"Multiple leaders assigned: {ids}. Exactly one leader required.")
+
+    # ── sampling ──
     sampling_raw = raw.get("sampling", {})
     sampling = SamplingConfig(
         tick_ms=int(sampling_raw.get("tick_ms", 50)),
@@ -134,7 +169,7 @@ def load_config(path: str) -> PartyConfig:
     if sampling.tick_ms <= 0:
         raise ValueError("sampling.tick_ms must be > 0.")
 
-    # --- runtime ---
+    # ── runtime ──
     runtime_raw = raw.get("runtime", {})
     runtime = RuntimeConfig(
         max_follower_lag_ms=int(runtime_raw.get("max_follower_lag_ms", 200)),
@@ -145,7 +180,7 @@ def load_config(path: str) -> PartyConfig:
         ),
     )
 
-    # --- nav (PoE2 offsets) ---
+    # ── nav (PoE2 offsets) ──
     nav: Optional[Dict[str, Any]] = None
     nav_raw = raw.get("nav")
     if nav_raw:
@@ -158,10 +193,15 @@ def load_config(path: str) -> PartyConfig:
         nav = {
             "aob": aob,
             "offsets": nav_raw.get("offsets", {}),
-            "world_to_grid_ratio": float(
-                nav_raw.get("world_to_grid_ratio", 10.8696)
-            ),
+            "world_to_grid_ratio": float(nav_raw.get("world_to_grid_ratio", 10.8696)),
             "render_component_name": nav_raw.get("render_component_name", "Render"),
+            "player_component_name": nav_raw.get("player_component_name", "Player"),
+            "player_component": nav_raw.get("player_component", {}),
+            "entity_path": nav_raw.get("entity_path", {}),
+            "portal": nav_raw.get("portal", {}),
+            "flask": nav_raw.get("flask", {}),
+            "auto_loot": nav_raw.get("auto_loot", {}),
+            "death": nav_raw.get("death", {}),
             "behavior": {
                 "formation": behavior.get("formation", {}),
                 "anti_stuck": behavior.get("anti_stuck", {}),
@@ -169,8 +209,7 @@ def load_config(path: str) -> PartyConfig:
         }
 
     return PartyConfig(
-        leader=leader,
-        followers=followers,
+        accounts=accounts,
         sampling=sampling,
         runtime=runtime,
         nav=nav,

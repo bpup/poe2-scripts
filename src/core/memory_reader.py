@@ -116,6 +116,13 @@ class HealthData:
     es_maximum: int = 0
 
 
+@dataclass(frozen=True)
+class CharacterInfo:
+    name: str
+    level: int
+    class_name: str  # Parsed from entity path, e.g. "Monk", "Sorceress"
+
+
 class MemoryReader:
     def __init__(self, nav_config: dict) -> None:
         self._nav = nav_config
@@ -205,6 +212,96 @@ class MemoryReader:
         if pos is None:
             return None
         return (pos, player_entity, area_instance)
+
+    def find_all_local_players(
+        self, proc: GameProcess,
+    ) -> List[Tuple[EntityPosition, CharacterInfo, int]]:
+        """Walk all awake entities and find every one with a PlayerComponent.
+
+        Scans the red-black tree of awake entities within the process. Each
+        entity that has a Player component is read for position and character
+        info. This finds ALL local co-op players in the process (P1 and P2),
+        not just the one at the area_instance.local_player pointer.
+
+        Returns:
+            List of (position, character_info, entity_addr) tuples — one
+            per local co-op player found. Typically returns 1-2 entries per
+            PoE2 process depending on whether local co-op is active.
+        """
+        game_states = self._game_states_cache.get(proc.pid)
+        if game_states is None:
+            game_states = self._resolve_game_states(proc)
+            if game_states is None:
+                return []
+            self._game_states_cache[proc.pid] = game_states
+
+        in_game_state = self._read_stdvec_first(
+            proc.handle, game_states, self._nav.get("offsets", {}),
+            "game_state", "current_state_ptr",
+        )
+        if in_game_state == 0:
+            return []
+
+        area_instance = self._read_ptr_at(
+            proc.handle, in_game_state, self._nav.get("offsets", {}),
+            "in_game_state", "area_instance",
+        )
+        if area_instance == 0:
+            return []
+
+        offsets = self._nav.get("offsets", {})
+        map_addr = area_instance + offsets["area_instance"]["awake_entities"]
+        sentinel = self._read_pointer(proc.handle, map_addr)
+        if sentinel == 0:
+            return []
+
+        players: List[Tuple[EntityPosition, CharacterInfo, int]] = []
+        cur = self._read_pointer(proc.handle, sentinel)
+        visited = {sentinel, cur}
+
+        while cur != sentinel and len(players) < 4:
+            if cur is None or cur < 0x10000:
+                break
+
+            entity_addr = self._read_pointer(proc.handle, cur + 0x28)
+            if entity_addr and entity_addr > 0x10000:
+                player_idx = self.resolve_component_index(
+                    proc, entity_addr,
+                    self._nav.get("player_component_name", "Player"),
+                )
+                if player_idx is not None:
+                    pos = self._read_entity_position(proc, entity_addr)
+                    if pos is not None:
+                        ci = self.read_character_info(proc, entity_addr)
+                        if ci is None:
+                            ci = CharacterInfo(name="", level=0, class_name="")
+                        players.append((pos, ci, entity_addr))
+
+            right = self._read_pointer(proc.handle, cur + 0x10)
+            if right and right > 0x10000 and right not in visited:
+                cur = right
+                while True:
+                    left = self._read_pointer(proc.handle, cur)
+                    if left and left > 0x10000 and left not in visited:
+                        cur = left
+                    else:
+                        break
+                visited.add(cur)
+            else:
+                parent = self._read_pointer(proc.handle, cur + 0x08)
+                while parent and parent > 0x10000:
+                    par_right = self._read_pointer(proc.handle, parent + 0x10)
+                    if cur != par_right:
+                        break
+                    cur = parent
+                    parent = self._read_pointer(proc.handle, cur + 0x08)
+                if parent and parent > 0x10000 and parent not in visited:
+                    cur = parent
+                    visited.add(parent)
+                else:
+                    cur = sentinel
+
+        return players
 
     def read_terrain_grid(self, proc: GameProcess) -> Optional[TerrainData]:
         offsets = self._nav.get("offsets", {})
@@ -439,6 +536,84 @@ class MemoryReader:
                 return idx
 
         return None
+
+    def read_character_info(self, proc: GameProcess, entity: int) -> Optional[CharacterInfo]:
+        player_idx = self.resolve_component_index(
+            proc, entity, self._nav.get("player_component_name", "Player")
+        )
+        if player_idx is None:
+            return None
+
+        cl_addr = entity + self._nav["offsets"]["entity"]["component_list"]
+        cl_begin = self._read_pointer(proc.handle, cl_addr)
+        if cl_begin == 0:
+            return None
+        player_comp = self._read_pointer(proc.handle, cl_begin + player_idx * 8)
+        if player_comp == 0:
+            return None
+
+        pcomp = self._nav["offsets"].get("player_component", {})
+        name_off = pcomp.get("name", 0x1B0)
+        lvl_off = pcomp.get("level", 0x204)
+
+        name = self._read_std_wstring(proc.handle, player_comp + name_off)
+        level = self._read_byte(proc.handle, player_comp + lvl_off)
+        path = self._read_entity_path(proc, entity)
+        class_name = self._parse_character_class(path)
+
+        if name is None or not name.strip():
+            return None
+        return CharacterInfo(name=name, level=level, class_name=class_name)
+
+    @staticmethod
+    def _parse_character_class(path: Optional[str]) -> str:
+        if not path:
+            return ""
+        parts = path.split("/")
+        if len(parts) >= 4:
+            return parts[3]
+        return ""
+
+    @staticmethod
+    def _read_std_wstring(handle: int, address: int, max_chars: int = 256) -> Optional[str]:
+        """Read an MSVC std::wstring, handling both SSO and heap-allocated modes."""
+        buf = (ctypes.c_byte * 24)()
+        bytes_read = ctypes.c_size_t()
+        ok = _ReadProcessMemory(
+            handle, ctypes.c_void_p(address), buf,
+            ctypes.sizeof(buf), ctypes.byref(bytes_read),
+        )
+        if not ok or bytes_read.value < 24:
+            return None
+
+        raw = bytes(buf[:24])
+        ptr_or_buf, mysize, myres = (
+            int.from_bytes(raw[0:8], "little"),
+            int.from_bytes(raw[8:16], "little"),
+            int.from_bytes(raw[16:24], "little"),
+        )
+        if mysize <= 0:
+            return None
+
+        if myres > 7:
+            data_addr = ptr_or_buf
+        else:
+            data_addr = address
+
+        return MemoryReader._read_utf16_string(handle, data_addr, min(mysize, max_chars))
+
+    @staticmethod
+    def _read_byte(handle: int, address: int) -> int:
+        buffer = ctypes.c_byte()
+        bytes_read = ctypes.c_size_t()
+        success = _ReadProcessMemory(
+            handle, ctypes.c_void_p(address),
+            ctypes.byref(buffer), ctypes.sizeof(buffer),
+            ctypes.byref(bytes_read),
+        )
+        if not success or bytes_read.value != ctypes.sizeof(buffer):
+            return 0
+        return buffer.value
 
     def _read_entity_path(self, proc: GameProcess, entity: int) -> Optional[str]:
         path_cfg = self._nav.get("entity_path", {})

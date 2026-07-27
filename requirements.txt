@@ -1,3 +1,4 @@
 pynput>=1.7.6
 pywin32>=306
 PyYAML>=6.0
+vgamepad>=0.2.2
