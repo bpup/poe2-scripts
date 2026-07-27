@@ -22,6 +22,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        env:
+          VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build EXE
