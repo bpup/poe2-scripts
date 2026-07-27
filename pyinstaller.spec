@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
 
 a = Analysis(
     ["src/app.py"],
@@ -16,6 +16,9 @@ a = Analysis(
         "win32api",
         "win32con",
         "tkinter",
+        "vgamepad",
+        "vgamepad.win.vigem",
+        "vgamepad.win.vigem.vigem_client",
     ],
     hookspath=[],
     hooksconfig={},
@@ -26,6 +29,12 @@ a = Analysis(
 )
 
 a.datas += [("config/nav-follow.yaml", "config/nav-follow.yaml", "DATA")]
+
+# Bundle ViGEmClient.dll from the vgamepad package
+try:
+    a.binaries += collect_dynamic_libs("vgamepad")
+except Exception:
+    pass
 
 pyz = PYZ(a.pure)
 
