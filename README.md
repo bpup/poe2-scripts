@@ -288,12 +288,43 @@ python launcher.py
 
 按 `config/nav-follow.yaml` 中的账号数量自动启动对应数量的 PoE2 实例。
 
+#### 一键启动（PoE2 多窗口 + ExileCore2）
+
+```bash
+# 方法 1：双击运行（推荐）
+one-click.bat
+
+# 方法 2：PowerShell
+powershell -ExecutionPolicy Bypass -File scripts/one-click.ps1
+```
+
+启动前编辑 `one-click-config.ps1` 设置路径：
+
+```powershell
+$WINDOWS = 3                    # PoE2 窗口数量
+$POE2_PATH = ""                 # PoE2.exe 路径（留空自动检测）
+$EXILECORE2_DIR = "D:\ExileCore2"  # ExileCore2 目录（可选）
+$LOGIN_WAIT = 90                # 每窗口登录等待秒数
+```
+
+脚本自动完成：
+1. 关闭所有 PoE2 + Loader 进程
+2. 依次启动 N 个 PoE2 窗口（自动解除 PoERunMutexB 互斥锁）
+3. 为每个 follower 窗口复制 ExileCore2 目录并启动 Loader
+
 ## 项目结构
 
 ```
 poe2_scripts/
+├── one-click.bat                     # 一键启动入口（双击运行）
+├── one-click-config.ps1              # 一键启动配置文件
 ├── config/
 │   └── nav-follow.yaml              # 配置文件（账号、角色、偏移、编队、防卡）
+├── scripts/
+│   ├── one-click.ps1                # 一键启动主脚本
+│   ├── launch-poe.ps1               # 交互式 PoE2 多窗口启动器
+│   ├── setup.bat                    # AutoFollow 安装脚本（发布包用）
+│   └── build.ps1                    # ExileCore2 完整构建脚本
 ├── src/
 │   ├── app.py                       # 入口 — 窗口选择 + 启动 GUI
 │   ├── common/
@@ -312,7 +343,12 @@ poe2_scripts/
 │       └── gui.py                   # tkinter 界面（账号/槽位选择、Leader/Follower 状态、日志）
 ├── launcher.py                      # 多实例启动器（mutex 解除 + Steam 启动）
 ├── .github/workflows/
-│   └── build.yml                    # CI：Windows PyInstaller 打包 + Release 发布
+│   └── build.yml                    # CI：AutoFollow 编译 + 完整包构建 + Release 发布
+├── ExileCore2Plugin/
+│   ├── AutoFollow.csproj            # ExileCore2 自动跟随插件
+│   ├── Core/FollowCore.cs           # 跟随逻辑
+│   ├── Core/BackgroundInput.cs      # 后台 PostMessage 输入
+│   └── Settings/                    # 插件设置
 ├── pyinstaller.spec                 # PyInstaller 打包配置
 └── requirements.txt
 ```
