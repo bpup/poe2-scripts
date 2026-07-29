@@ -18,8 +18,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
         Name = "AutoFollow (No Foreground)";
 
         // Resolve window handle from the game process
-        var gameProcess = GameController?.Window?.Handle;
-        _windowHandle = gameProcess ?? IntPtr.Zero;
+        _windowHandle = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
 
         if (_windowHandle == IntPtr.Zero)
         {
@@ -36,7 +35,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
             {
                 Settings.LeaderName.Value = playerName;
                 LogMsg($"Auto-detected local player '{playerName}' as potential leader. "
-                     + $"Change in settings if you are a follower.", 5f);
+                     + $"Change in settings if you are a follower.");
             }
         }
 
@@ -44,7 +43,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
         _pluginReady = true;
 
         LogMsg("AutoFollow initialized. "
-             + "Work on background windows. F12 to toggle overlay.", 5f);
+             + "Work on background windows. F12 to toggle overlay.");
 
         return true;
     }
@@ -62,7 +61,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
 
         if (_windowHandle == IntPtr.Zero)
         {
-            _windowHandle = GameController?.Window?.Handle ?? IntPtr.Zero;
+            _windowHandle = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
             if (_windowHandle == IntPtr.Zero)
             {
                 ImGui.TextColored(new System.Numerics.Vector4(1, 0.3f, 0.3f, 1),

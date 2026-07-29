@@ -32,7 +32,6 @@ public class FollowCore
     private FollowState _state = FollowState.Idle;
     private int _leaderEntityId = -1;
     private Vector2 _lastLeaderPos;
-    private bool _leaderInRange;
 
     public FollowState State => _state;
     public Vector2 LastLeaderPos => _lastLeaderPos;
@@ -75,17 +74,18 @@ public class FollowCore
             return;
         }
 
-        _leaderEntityId = leaderEntity.Id;
-        _lastLeaderPos = leaderEntity.Pos;
+        _leaderEntityId = (int)leaderEntity.Id;
+        _lastLeaderPos = new Vector2(leaderEntity.Pos.X, leaderEntity.Pos.Y);
 
-        var playerPos = player.Pos;
-        var distToLeader = Vector2.Distance(playerPos, leaderEntity.Pos);
+        var playerPos = new Vector2(player.Pos.X, player.Pos.Y);
+        var leaderWorldPos = new Vector2(leaderEntity.Pos.X, leaderEntity.Pos.Y);
+        var distToLeader = Vector2.Distance(playerPos, leaderWorldPos);
 
         // -- Flask check ------------------------------------------------
         HandleFlask(localLife, windowHandle);
 
         // -- Portal check -----------------------------------------------
-        if (_settings.AutoPortal && TryEnterPortal(playerPos, leaderEntity.Pos, windowHandle))
+        if (_settings.AutoPortal && TryEnterPortal(playerPos, leaderWorldPos, windowHandle))
         {
             SetState(FollowState.EnteringPortal);
             return;
@@ -118,7 +118,7 @@ public class FollowCore
 
         _lastFollowTick = now;
 
-        var followTarget = CalculateFollowTarget(playerPos, leaderEntity.Pos, distToLeader);
+        var followTarget = CalculateFollowTarget(playerPos, leaderWorldPos, distToLeader);
         BackgroundInput.ClickWorldPos(windowHandle, followTarget, _gameController);
     }
 
@@ -163,7 +163,7 @@ public class FollowCore
             if (entity == null || !entity.IsHostile) continue;
             if (!entity.IsAlive) continue;
 
-            var dist = Vector2.Distance(playerPos, entity.Pos);
+            var dist = Vector2.Distance(playerPos, new Vector2(entity.Pos.X, entity.Pos.Y));
             if (dist <= range) return true;
         }
 
@@ -240,7 +240,7 @@ public class FollowCore
 
             if (!isPortal) continue;
 
-            var distToPortal = Vector2.Distance(playerPos, entity.Pos);
+            var distToPortal = Vector2.Distance(playerPos, new Vector2(entity.Pos.X, entity.Pos.Y));
             if (distToPortal > _settings.PortalRadius) continue;
 
             var now = DateTime.UtcNow;

@@ -37,7 +37,7 @@ public class AntiForegroundFollowSettings : ISettings
     public RangeNode<float> AttackRange { get; set; } = new RangeNode<float>(60f, 10f, 120f);
 
     [Menu("Attack Skill Key", "Keyboard key for your main attack skill")]
-    public HotkeyNode AttackSkillKey { get; set; } = new HotkeyNode(System.Windows.Forms.Keys.Q);
+    public HotkeyNodeV2 AttackSkillKey { get; set; } = new HotkeyNodeV2(System.Windows.Forms.Keys.Q);
 
     [Menu("Attack Interval (ms)", "Min time between skill uses", 200, 3000)]
     public RangeNode<int> AttackIntervalMs { get; set; } = new RangeNode<int>(800, 200, 3000);
