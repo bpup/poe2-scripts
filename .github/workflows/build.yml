@@ -32,12 +32,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Restore ExileCore2 (produces ref DLLs)
-        run: dotnet restore ExileCore2/Core/ExileCore2.csproj
-
-      - name: Build ExileCore2
-        run: dotnet build ExileCore2/Core/ExileCore2.csproj --configuration ${{ matrix.configuration }} --no-restore
-
       - name: Restore AutoFollow packages
         run: dotnet restore ExileCore2Plugin/AutoFollow.csproj
 
@@ -54,6 +48,7 @@ jobs:
           if-no-files-found: error
 
   # ── Full package build (ExileCore2 + AutoFollow + Loader) ──────────
+  # ExileCore2 is a binary-only distribution (no source, no .csproj).
   build-full-package:
     runs-on: windows-2022
     needs: build
@@ -64,7 +59,7 @@ jobs:
         with:
           path: repo
 
-      - name: Clone ExileCore2
+      - name: Clone ExileCore2 binary release
         uses: actions/checkout@v4
         with:
           repository: exCore2/ExileCore2
@@ -74,15 +69,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-
-      - name: Restore ExileCore2
-        run: dotnet restore repo/ExileCore2/Core/ExileCore2.csproj
-
-      - name: Build ExileCore2
-        run: dotnet build repo/ExileCore2/Core/ExileCore2.csproj --configuration Release --no-restore
-
-      - name: Build Loader
-        run: dotnet build repo/ExileCore2/Loader/Loader.csproj --configuration Release --no-restore
 
       - name: Build AutoFollow
         run: dotnet build repo/ExileCore2Plugin/AutoFollow.csproj --configuration Release
@@ -94,10 +80,10 @@ jobs:
           $out = "package"
           New-Item -ItemType Directory -Force -Path $out
 
-          # ExileCore2 Loader output
-          Copy-Item -Recurse "repo/ExileCore2/Loader/bin/Release/net8.0-windows/*" "$out/ExileCore2/" -Force
+          # Copy ExileCore2 binary release (Loader.exe + all DLLs)
+          Copy-Item -Recurse "repo/ExileCore2/*" "$out/ExileCore2/" -Force
 
-          # AutoFollow DLL
+          # AutoFollow DLL → Plugins folder
           Copy-Item "repo/ExileCore2Plugin/bin/Release/net8.0-windows/AutoFollow.dll" "$out/ExileCore2/Plugins/" -Force
 
           # Setup script & README

@@ -62,6 +62,7 @@ WM_KEYUP = 0x0101
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+_KEYEVENTF_KEYUP = 0x0002
 
 _CLICK_COOLDOWN_BASE = 0.5
 _CLICK_COOLDOWN_JITTER = 0.2
@@ -84,6 +85,96 @@ class InputInjector:
 
     def __init__(self) -> None:
         self._last_click: Dict[int, float] = {}
+        self._foreground_hwnd: int = 0
+
+    def activate_window(self, hwnd: int) -> bool:
+        """Bring target window to foreground so SendInput delivers keystrokes.
+
+        PostMessage works without focus for most games, but PoE2 uses
+        DirectInput for WASD movement, which reads raw keyboard state
+        rather than the message queue. SendInput delivers to the virtual
+        keyboard device, but Windows forwards it to the foreground window.
+        This method must be called before any SendInput injection.
+        """
+        self._foreground_hwnd = hwnd
+        try:
+            import win32gui
+            import win32con
+
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(hwnd)
+            return True
+        except Exception:
+            logger.exception("activate_window failed for hwnd=%d", hwnd)
+            return False
+
+    def send_input_keyboard(self, key_str: str, down: bool) -> bool:
+        """Inject keystroke via SendInput — reaches DirectInput-based games.
+
+        Unlike PostMessage, SendInput feeds into the system input stream
+        at the hardware keyboard level. Requires the target window to be
+        in the foreground (call activate_window first).
+
+        Use this ONLY when PostMessage fails for DirectInput/WASD movement.
+        PostMessage is preferred for all other inputs (skill keys, flasks)
+        since it doesn't steal focus.
+        """
+        vk_code, scan_code = self._lookup(key_str)
+        if vk_code is None:
+            return False
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            INPUT_KEYBOARD = 1
+            KEYEVENTF_SCANCODE = 0x0008
+
+            class KEYBDINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("wVk", wintypes.WORD),
+                    ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.c_ulong),
+                ]
+
+            class INPUT(ctypes.Structure):
+                _fields_ = [
+                    ("type", wintypes.DWORD),
+                    ("ki", KEYBDINPUT),
+                    ("_pad", ctypes.c_ulong * 3),
+                ]
+
+            ki = KEYBDINPUT()
+            ki.wVk = vk_code
+            ki.wScan = scan_code
+            ki.dwFlags = KEYEVENTF_SCANCODE
+            if not down:
+                ki.dwFlags |= _KEYEVENTF_KEYUP
+            ki.time = 0
+            ki.dwExtraInfo = 0
+
+            inp = INPUT()
+            inp.type = INPUT_KEYBOARD
+            inp.ki = ki
+
+            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+            logger.debug("SendInput %s -> key='%s'", "DOWN" if down else "UP", key_str)
+            return True
+        except Exception:
+            logger.exception("SendInput failed for key='%s'", key_str)
+            return False
+
+    def send_input_pair(self, key_str: str) -> bool:
+        """Press and release a key via SendInput in quick succession."""
+        if not self.send_input_keyboard(key_str, down=True):
+            return False
+        import time
+        time.sleep(0.02)
+        return self.send_input_keyboard(key_str, down=False)
 
     def press(self, hwnd: int, key_str: str) -> bool:
         vk_code, scan_code = self._lookup(key_str)

@@ -197,11 +197,8 @@ class NavAgent:
             except Exception:
                 pass
 
-        sorted_pids = sorted(set(hwnd_pids.values()))
-        pid_to_hwnd = {pid: hwnd for hwnd, pid in hwnd_pids.items()}
-
-        for idx, (account, pid) in enumerate(zip(config.accounts, sorted_pids)):
-            hwnd = pid_to_hwnd.get(pid, 0)
+        for idx, (account, hwnd) in enumerate(zip(config.accounts, hwnds)):
+            pid = hwnd_pids.get(hwnd, 0)
             for char in account.characters:
                 pkey = f"{account.id}:{char.slot}"
                 player = Player(
@@ -257,6 +254,10 @@ class NavAgent:
             self._running = False
             return
 
+        if leader.hwnd:
+            self._injector.activate_window(leader.hwnd)
+            logger.info("Leader window (hwnd=%d) activated.", leader.hwnd)
+
         followers = [p for p in self._players.values()
                      if p.role == "follower" and p.pid != 0]
         if not followers:
@@ -296,6 +297,9 @@ class NavAgent:
         leader = self._players.get(self._leader_key)
         if leader is None:
             return
+
+        if leader.hwnd and not self._is_foreground(leader.hwnd):
+            self._injector.activate_window(leader.hwnd)
 
         leader_proc = self._reader.open_process(leader.pid)
         if leader_proc is None:
@@ -433,8 +437,8 @@ class NavAgent:
         all_players = self._reader.find_all_local_players(proc)
         if player.slot >= len(all_players):
             return None
-        _, x, y, z = all_players[player.slot]
-        return (EntityPosition(float(x), float(y), float(z)), None, None)
+        pos, _, entity_addr = all_players[player.slot]
+        return (pos, entity_addr, None)
 
     # -- Movement routing ------------------------------------------------
 
@@ -452,6 +456,14 @@ class NavAgent:
     def _cid(self, player: Player) -> int:
         return self._vgamepad_ids.get(player.key, -1)
 
+    @staticmethod
+    def _is_foreground(hwnd: int) -> bool:
+        try:
+            import win32gui
+            return win32gui.GetForegroundWindow() == hwnd
+        except Exception:
+            return False
+
     def _apply_keys_delta(self, player: Player, desired: Set[str]) -> None:
         current = self._held_keys.get(player.key, set())
         for key in current - desired:
@@ -461,12 +473,6 @@ class NavAgent:
         self._held_keys[player.key] = desired
 
     # -- WASD / anti-stuck / formation -----------------------------------
-
-        # Periodic config hot-reload check
-        self._reload_tick_counter += 1
-        if self._reload_tick_counter >= _CONFIG_RELOAD_INTERVAL:
-            self._reload_tick_counter = 0
-            self._maybe_reload_config()
 
     def _compute_wasd(
         self, player: Player, target: Tuple[float, float],

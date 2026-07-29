@@ -10,9 +10,39 @@
 #     slot:         0 = P1 (keyboard), 1 = P2 (gamepad)
 #     role:         leader | follower
 #     input_method: keyboard | gamepad | none (default: inferred from slot)
-#                   - P1 = keyboard (PostMessage — broken for PoE2 movement)
+#                   - P1 = keyboard (PostMessage)
 #                   - P2 = gamepad  (ViGEmBus virtual Xbox 360 controller)
 #                   - none = monitor position only, no input injected
+#
+# ── 1 手柄 4 角色设置指南 ──
+#
+# 目标：用 1 个物理手柄 + 2 个 PoE2 窗口，操控 4 个角色（本地双人 x2）。
+#
+# 游戏内要求：每个窗口里 P1 是键盘，P2 是手柄（游戏设置）。
+# 本工具用 ViGEmBus 给每个窗口的 P2 创建虚拟 X360 手柄，不需要 HidHide。
+#
+# 窗口 1（账号 main）:
+#   P1 (slot 0): 键盘 · Leader — 你亲自操作
+#   P2 (slot 1): 虚拟手柄 · Follower — 工具自动跟随
+#
+# 窗口 2（账号 alt）:
+#   P1 (slot 0): 键盘 · Follower — 工具注入（技能键/血瓶可用）
+#   P2 (slot 1): 虚拟手柄 · Follower — 工具自动跟随
+#
+# ⚠️ 已知限制：
+#   - P1 的 WASD 移动通过 PostMessage 注入，但 PoE2 用 DirectInput 读取
+#     移动输入，PostMessage 不生效。P1 跟随者可以放技能/喝血瓶，但无法
+#     自动移动。SendInput 回退已实现但需要窗口焦点。
+#
+# 推荐方案（如果 P1 跟随者需要自动移动）：
+#   使用 2 个物理手柄 + HidHide 分别分配给每个窗口的 P2，
+#   P1 跟随者改为手动操作或用按键精灵。
+#
+# 登录流程：
+#   1. 启动 2 个 PoE2 窗口（用 launcher.py 或手动）
+#   2. 两边都进游戏 → 按手柄 A 键激活 P2 → 创建/加入 P2 角色
+#   3. 确保两边都进入主城后启动本工具
+#   4. GUI 选择窗口 → Start → 工具开始跟随
 
 accounts:
   - id: main
