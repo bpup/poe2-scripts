@@ -84,6 +84,7 @@ jobs:
           Copy-Item -Recurse "repo/ExileCore2/*" "$out/ExileCore2/" -Force
 
           # AutoFollow DLL → Plugins folder
+          New-Item -ItemType Directory -Force -Path "$out/ExileCore2/Plugins"
           Copy-Item "repo/ExileCore2Plugin/bin/Release/net8.0-windows/AutoFollow.dll" "$out/ExileCore2/Plugins/" -Force
 
           # Setup script & README
