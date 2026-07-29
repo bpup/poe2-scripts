@@ -14,9 +14,10 @@
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$rootDir  = Split-Path -Parent $scriptDir
 
 # ── Load config ──────────────────────────────────────────────────────
-$configFile = "$scriptDir\one-click-config.ps1"
+$configFile = "$rootDir\one-click-config.ps1"
 if (Test-Path $configFile) { . $configFile }
 if (-not $WINDOWS)       { $WINDOWS = 3 }
 if (-not $LOGIN_WAIT)    { $LOGIN_WAIT = 90 }

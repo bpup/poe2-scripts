@@ -13,5 +13,5 @@ if %errorlevel% neq 0 (
     exit /b
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0one-click.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\one-click.ps1"
 pause
