@@ -20,7 +20,7 @@ public enum FollowState
 public class FollowCore
 {
     private readonly GameController _gameController;
-    private readonly AntiForegroundFollow.Settings.AntiForegroundFollowSettings _settings;
+    private readonly Settings.AntiForegroundFollowSettings _settings;
     private readonly Random _rand;
 
     private DateTime _lastFollowTick = DateTime.MinValue;
@@ -40,7 +40,7 @@ public class FollowCore
 
     public FollowCore(
         GameController gameController,
-        AntiForegroundFollow.Settings.AntiForegroundFollowSettings settings)
+        Settings.AntiForegroundFollowSettings settings)
     {
         _gameController = gameController;
         _settings = settings;
