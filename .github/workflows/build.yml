@@ -1,42 +1,136 @@
-name: Build Windows EXE
+name: Build & Release AutoFollow
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [main, master]
+    tags:
+      - 'v*'
   pull_request:
-    branches: [main]
+    branches: [main, master]
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+    runs-on: windows-2022
+
+    strategy:
+      matrix:
+        configuration: [Release]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout AutoFollow
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
         with:
-          python-version: "3.12"
+          dotnet-version: 8.0.x
 
-      - name: Install dependencies
-        env:
-          VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
-        run: pip install -r requirements.txt pyinstaller
+      - name: Restore AutoFollow packages
+        run: dotnet restore ExileCore2Plugin/AutoFollow.csproj
 
-      - name: Build EXE
-        run: pyinstaller pyinstaller.spec
+      - name: Build AutoFollow
+        run: dotnet build ExileCore2Plugin/AutoFollow.csproj --configuration ${{ matrix.configuration }} --no-restore
 
-      - name: Upload EXE artifact
+      - name: Publish plugin artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: poe2-follow
-          path: dist/poe2-follow.exe
+          name: AutoFollow-plugin-${{ matrix.configuration }}
+          path: |
+            ExileCore2Plugin/bin/${{ matrix.configuration }}/net8.0-windows/AutoFollow.dll
+            ExileCore2Plugin/bin/${{ matrix.configuration }}/net8.0-windows/AutoFollow.pdb
+          if-no-files-found: error
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
+  # ── Full package build (ExileCore2 + AutoFollow + Loader) ──────────
+  build-full-package:
+    runs-on: windows-2022
+    needs: build
+
+    steps:
+      - name: Checkout AutoFollow
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Clone ExileCore2
+        uses: actions/checkout@v4
+        with:
+          repository: exCore2/ExileCore2
+          path: exilecore2
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore ExileCore2
+        run: dotnet restore exilecore2/Core/ExileCore2.csproj
+        working-directory: exilecore2
+
+      - name: Build ExileCore2
+        run: dotnet build exilecore2/Core/ExileCore2.csproj --configuration Release --no-restore
+        working-directory: exilecore2
+
+      - name: Build Loader
+        run: dotnet build exilecore2/Loader/Loader.csproj --configuration Release --no-restore
+        working-directory: exilecore2
+
+      - name: Build AutoFollow
+        run: dotnet build repo/ExileCore2Plugin/AutoFollow.csproj --configuration Release
+        working-directory: repo
+
+      - name: Assemble release package
+        shell: powershell
+        run: |
+          $out = "package"
+          New-Item -ItemType Directory -Force -Path $out
+
+          # ExileCore2 Loader output
+          Copy-Item -Recurse "exilecore2/Loader/bin/Release/net8.0-windows/*" "$out/ExileCore2/" -Force
+
+          # AutoFollow DLL
+          Copy-Item "repo/ExileCore2Plugin/bin/Release/net8.0-windows/AutoFollow.dll" "$out/ExileCore2/Plugins/" -Force
+
+          # Setup script & README
+          Copy-Item "repo/scripts/setup.bat" "$out/" -Force
+          Copy-Item "repo/ExileCore2Plugin/README.md" "$out/" -Force
+
+          # ZIP
+          Compress-Archive -Path "$out/*" -DestinationPath "AutoFollow-Release.zip" -Force
+
+      - name: Upload full package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoFollow-FullPackage
+          path: AutoFollow-Release.zip
+          if-no-files-found: error
+
+  # ── Release (only on tag push) ──────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [build, build-full-package]
+
+    steps:
+      - name: Download DLL artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoFollow-plugin-Release
+          path: artifacts/dll
+
+      - name: Download full package
+        uses: actions/download-artifact@v4
+        with:
+          name: AutoFollow-FullPackage
+          path: artifacts/full
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/poe2-follow.exe
+          name: ${{ github.ref_name }}
+          files: |
+            artifacts/dll/AutoFollow.dll
+            artifacts/full/AutoFollow-Release.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

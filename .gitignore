@@ -10,3 +10,12 @@ env/
 *.egg-info/
 dist/
 build/
+
+# C# build output
+ExileCore2Plugin/bin/
+ExileCore2Plugin/obj/
+
+# Build scripts temp
+build_temp/
+release/
+*.zip
