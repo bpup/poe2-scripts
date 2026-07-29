@@ -32,6 +32,12 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Restore ExileCore2 (produces ref DLLs)
+        run: dotnet restore ExileCore2/Core/ExileCore2.csproj
+
+      - name: Build ExileCore2
+        run: dotnet build ExileCore2/Core/ExileCore2.csproj --configuration ${{ matrix.configuration }} --no-restore
+
       - name: Restore AutoFollow packages
         run: dotnet restore ExileCore2Plugin/AutoFollow.csproj
 
