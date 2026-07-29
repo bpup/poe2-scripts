@@ -21,6 +21,12 @@ jobs:
       - name: Checkout AutoFollow
         uses: actions/checkout@v4
 
+      - name: Clone ExileCore2 (compile-time refs)
+        uses: actions/checkout@v4
+        with:
+          repository: exCore2/ExileCore2
+          path: ExileCore2
+
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
