@@ -32,6 +32,9 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Check mouse message coordinate packing
+        run: dotnet run --project tests/MouseMessageCoordinates/MouseMessageCoordinates.csproj --configuration Release
+
       - name: Restore AutoFollow packages
         run: dotnet restore ExileCore2Plugin/AutoFollow.csproj
 

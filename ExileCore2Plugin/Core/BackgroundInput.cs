@@ -23,6 +23,7 @@ public static class BackgroundInput
 {
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_LBUTTONUP   = 0x0202;
+    private const uint MK_LBUTTON     = 0x0001;
     private const uint WM_KEYDOWN     = 0x0100;
     private const uint WM_KEYUP       = 0x0101;
 
@@ -35,7 +36,7 @@ public static class BackgroundInput
     private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
-    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
@@ -55,11 +56,18 @@ public static class BackgroundInput
     /// Click on a screen coordinate in a BACKGROUND window.
     /// Uses PostMessage → works without foreground focus.
     /// </summary>
-    public static void ClickAt(IntPtr hwnd, int screenX, int screenY)
+    public static bool ClickAt(IntPtr hwnd, int screenX, int screenY)
     {
-        IntPtr lParam = (IntPtr)((screenY << 16) | (screenX & 0xFFFF));
-        PostMessage(hwnd, WM_LBUTTONDOWN, IntPtr.Zero, lParam);
-        PostMessage(hwnd, WM_LBUTTONUP,   IntPtr.Zero, lParam);
+        if (hwnd == IntPtr.Zero || !GetClientRect(hwnd, out var rect)) return false;
+        var point = new POINT { X = screenX, Y = screenY };
+        if (!ScreenToClient(hwnd, ref point) ||
+            !MouseMessageCoordinates.TryPack(point.X, point.Y,
+                rect.Right - rect.Left, rect.Bottom - rect.Top, out var lParam))
+            return false;
+
+        if (!PostMessage(hwnd, WM_LBUTTONDOWN, new IntPtr(MK_LBUTTON), lParam))
+            return false;
+        return PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
     }
 
     /// <summary>
@@ -93,8 +101,7 @@ public static class BackgroundInput
             clickY = Math.Clamp(clickY, window.Y, window.Y + window.Height);
             clickX = Math.Clamp(clickX, window.X, window.X + window.Width);
 
-            ClickAt(hwnd, clickX, clickY);
-            return true;
+            return ClickAt(hwnd, clickX, clickY);
         }
         catch
         {
