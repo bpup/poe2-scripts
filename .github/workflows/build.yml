@@ -81,7 +81,7 @@ jobs:
         shell: powershell
         run: |
           $out = "package"
-          New-Item -ItemType Directory -Force -Path $out
+          New-Item -ItemType Directory -Force -Path "$out/ExileCore2"
 
           # Copy ExileCore2 binary release (Loader.exe + all DLLs)
           Copy-Item -Recurse "repo/ExileCore2/*" "$out/ExileCore2/" -Force
