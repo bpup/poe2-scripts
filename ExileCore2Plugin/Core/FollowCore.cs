@@ -3,7 +3,7 @@ using ExileCore2.PoEMemory.Components;
 using ExileCore2.PoEMemory.MemoryObjects;
 using ExileCore2.Shared.Enums;
 using ExileCore2.Shared.Helpers;
-using SharpDX;
+using System.Numerics;
 using System.Diagnostics;
 
 namespace AutoFollow.Core;
@@ -31,10 +31,10 @@ public class FollowCore
 
     private FollowState _state = FollowState.Idle;
     private int _leaderEntityId = -1;
-    private Vector2 _lastLeaderPos;
+    private Vector3 _lastLeaderPos;
 
     public FollowState State => _state;
-    public Vector2 LastLeaderPos => _lastLeaderPos;
+    public Vector3 LastLeaderPos => _lastLeaderPos;
     public bool LeaderFound => _leaderEntityId >= 0;
 
     public FollowCore(
@@ -75,11 +75,11 @@ public class FollowCore
         }
 
         _leaderEntityId = (int)leaderEntity.Id;
-        _lastLeaderPos = new Vector2(leaderEntity.Pos.X, leaderEntity.Pos.Y);
+        _lastLeaderPos = leaderEntity.Pos;
 
-        var playerPos = new Vector2(player.Pos.X, player.Pos.Y);
-        var leaderWorldPos = new Vector2(leaderEntity.Pos.X, leaderEntity.Pos.Y);
-        var distToLeader = Vector2.Distance(playerPos, leaderWorldPos);
+        var playerPos = player.Pos;
+        var leaderWorldPos = leaderEntity.Pos;
+        var distToLeader = Vector3.Distance(playerPos, leaderWorldPos);
 
         // -- Flask check ------------------------------------------------
         HandleFlask(localLife, windowHandle);
@@ -127,7 +127,7 @@ public class FollowCore
         var party = _gameController?.Game?.IngameState?.Data?.LocalPlayer?.GetComponent<Player>();
         if (party == null) return null;
 
-        var entities = _gameController?.Game?.Entities;
+        var entities = _gameController?.Entities;
         if (entities == null) return null;
 
         var leaderName = _settings.LeaderName.Value;
@@ -153,9 +153,9 @@ public class FollowCore
         return null;
     }
 
-    private bool FindNearestEnemy(Vector2 playerPos, float range)
+    private bool FindNearestEnemy(Vector3 playerPos, float range)
     {
-        var entities = _gameController?.Game?.Entities;
+        var entities = _gameController?.Entities;
         if (entities == null) return false;
 
         foreach (var entity in entities)
@@ -163,16 +163,16 @@ public class FollowCore
             if (entity == null || !entity.IsHostile) continue;
             if (!entity.IsAlive) continue;
 
-            var dist = Vector2.Distance(playerPos, new Vector2(entity.Pos.X, entity.Pos.Y));
+            var dist = Vector3.Distance(playerPos, entity.Pos);
             if (dist <= range) return true;
         }
 
         return false;
     }
 
-    private Vector2 CalculateFollowTarget(Vector2 playerPos, Vector2 leaderPos, float dist)
+    private Vector3 CalculateFollowTarget(Vector3 playerPos, Vector3 leaderPos, float dist)
     {
-        var dir = Vector2.Normalize(leaderPos - playerPos);
+        var dir = Vector3.Normalize(leaderPos - playerPos);
         var targetDist = dist - _settings.StopDistance * 0.5f;
         var target = playerPos + dir * targetDist;
 
@@ -220,13 +220,13 @@ public class FollowCore
             return;
 
         _lastAttackTick = now;
-        BackgroundInput.SendKey(hwnd, _settings.AttackSkillKey);
+        BackgroundInput.SendKey(hwnd, _settings.AttackSkillKey.Value.Key);
     }
 
-    private bool TryEnterPortal(Vector2 playerPos, Vector2 leaderPos, IntPtr hwnd)
+    private bool TryEnterPortal(Vector3 playerPos, Vector3 leaderPos, IntPtr hwnd)
     {
         // Detect nearby area transition objects near the leader
-        var entities = _gameController?.Game?.Entities;
+        var entities = _gameController?.Entities;
         if (entities == null) return false;
 
         foreach (var entity in entities)
@@ -240,7 +240,7 @@ public class FollowCore
 
             if (!isPortal) continue;
 
-            var distToPortal = Vector2.Distance(playerPos, new Vector2(entity.Pos.X, entity.Pos.Y));
+            var distToPortal = Vector3.Distance(playerPos, entity.Pos);
             if (distToPortal > _settings.PortalRadius) continue;
 
             var now = DateTime.UtcNow;
@@ -248,8 +248,7 @@ public class FollowCore
 
             _lastPortalClick = now;
 
-            var interactPos = new Vector2(entity.Pos.X, entity.Pos.Y);
-            BackgroundInput.ClickWorldPos(hwnd, interactPos, _gameController);
+            BackgroundInput.ClickWorldPos(hwnd, entity.Pos, _gameController);
             return true;
         }
 

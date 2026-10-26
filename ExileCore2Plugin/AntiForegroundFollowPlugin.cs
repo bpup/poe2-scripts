@@ -4,6 +4,7 @@ using ExileCore2.Shared.Enums;
 using ImGuiNET;
 using AutoFollow.Core;
 using AutoFollow.Settings;
+using System.Numerics;
 
 namespace AutoFollow;
 
@@ -18,7 +19,8 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
         Name = "AutoFollow (No Foreground)";
 
         // Resolve window handle from the game process
-        _windowHandle = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+        if (GameController == null) return false;
+        _windowHandle = GameController.Window.Process.MainWindowHandle;
 
         if (_windowHandle == IntPtr.Zero)
         {
@@ -61,7 +63,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
 
         if (_windowHandle == IntPtr.Zero)
         {
-            _windowHandle = System.Diagnostics.Process.GetCurrentProcess().MainWindowHandle;
+            _windowHandle = GameController?.Window?.Process?.MainWindowHandle ?? IntPtr.Zero;
             if (_windowHandle == IntPtr.Zero)
             {
                 ImGui.TextColored(new System.Numerics.Vector4(1, 0.3f, 0.3f, 1),
@@ -92,7 +94,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
             var player = GameController?.Game?.IngameState?.Data?.LocalPlayer;
             if (player != null)
             {
-                var dist = SharpDX.Vector2.Distance(player.Pos, _followCore.LastLeaderPos);
+                var dist = Vector3.Distance(player.Pos, _followCore.LastLeaderPos);
                 ImGui.Text($"Distance: {dist:F0} units");
             }
         }
@@ -109,7 +111,7 @@ public class AntiForegroundFollowPlugin : BaseSettingsPlugin<AntiForegroundFollo
             if (camera != null)
             {
                 var screenPos = camera.WorldToScreen(_followCore.LastLeaderPos);
-                if (screenPos != SharpDX.Vector2.Zero)
+                if (screenPos != Vector2.Zero)
                 {
                     var drawList = ImGui.GetBackgroundDrawList();
                     var leaderScreen = new System.Numerics.Vector2(screenPos.X, screenPos.Y);

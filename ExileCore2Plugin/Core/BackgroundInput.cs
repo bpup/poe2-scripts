@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Numerics;
 using ExileCore2;
 
 namespace AutoFollow.Core;
@@ -38,6 +39,9 @@ public static class BackgroundInput
     [DllImport("user32.dll")]
     private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
     {
@@ -74,7 +78,7 @@ public static class BackgroundInput
     /// Click at a world position. Converts world → screen → PostMessage click.
     /// The game's built-in pathfinding handles the navigation.
     /// </summary>
-    public static bool ClickWorldPos(IntPtr hwnd, SharpDX.Vector2 worldPos, GameController gameController)
+    public static bool ClickWorldPos(IntPtr hwnd, Vector3 worldPos, GameController gameController)
     {
         try
         {
@@ -86,22 +90,16 @@ public static class BackgroundInput
             if (camera == null) return false;
 
             var screenVec = camera.WorldToScreen(worldPos);
-            if (screenVec == SharpDX.Vector2.Zero) return false;
+            if (!float.IsFinite(screenVec.X) || !float.IsFinite(screenVec.Y) ||
+                !GetClientRect(hwnd, out var rect)) return false;
 
-            // Convert to screen coordinates relative to the window
-            var window = ingameState.IngameUi.GameWindowRect;
-            int clickX = (int)(screenVec.X + window.X);
-            int clickY = (int)(screenVec.Y + window.Y);
+            // The camera projection is expressed in viewport pixels.
+            var point = new POINT { X = (int)screenVec.X, Y = (int)screenVec.Y };
+            if (!MouseMessageCoordinates.TryPack(point.X, point.Y,
+                rect.Right - rect.Left, rect.Bottom - rect.Top, out _) ||
+                !ClientToScreen(hwnd, ref point)) return false;
 
-            // Clamp to window bounds
-            if (clickX < window.X || clickX > window.X + window.Width ||
-                clickY < window.Y || clickY > window.Y + window.Height)
-                return false;
-
-            clickY = Math.Clamp(clickY, window.Y, window.Y + window.Height);
-            clickX = Math.Clamp(clickX, window.X, window.X + window.Width);
-
-            return ClickAt(hwnd, clickX, clickY);
+            return ClickAt(hwnd, point.X, point.Y);
         }
         catch
         {
