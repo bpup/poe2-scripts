@@ -74,7 +74,7 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Build AutoFollow
-        run: dotnet build repo/ExileCore2Plugin/AutoFollow.csproj --configuration Release
+        run: dotnet build ExileCore2Plugin/AutoFollow.csproj --configuration Release
         working-directory: repo
 
       - name: Assemble release package
